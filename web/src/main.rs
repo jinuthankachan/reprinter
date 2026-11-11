@@ -1,19 +1,26 @@
-//! reprinter-web: a browser front end for a reprinter CUPS print server.
+//! reprinter-web: a browser front end for a reprinter CUPS print server, and
+//! a one-file installer for the whole print server.
 //!
-//! Serves a single-page interface (static/, embedded in the binary) and a
-//! JSON API under /api: upload a file, choose the page setup and print it;
-//! watch and cancel jobs; change printer, CUPS and web interface settings.
-//! It reads state from the local scheduler over IPP and makes changes with
-//! the CUPS command-line tools, so it runs as an unprivileged user in the
-//! `lpadmin` group (see reprinter-web.service).
+//! `reprinter-web install` sets up the host: it runs reprinter's installer
+//! (install.sh, embedded in the binary) for CUPS, the printer driver and the
+//! queue, then installs this binary as the reprinter-web service.
+//!
+//! `reprinter-web` (or `reprinter-web serve`) is the service: a single-page
+//! interface (static/, embedded) and a JSON API under /api to print files,
+//! watch and cancel jobs, and change printer, CUPS and web interface
+//! settings. It reads state from the local scheduler over IPP and makes
+//! changes with the CUPS command-line tools, so it runs as an unprivileged
+//! user in the `lpadmin` group (see reprinter-web.service).
 
 mod auth;
 mod config;
 mod cups;
+mod embedded;
 mod error;
 mod ipp;
 mod profiles;
 mod routes;
+mod setup;
 mod uploads;
 
 use std::{
@@ -29,13 +36,19 @@ use crate::config::Config;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &str = "\
-Usage: reprinter-web [options]
+Usage:
+  sudo reprinter-web install [options]   set up this host as a print server, with the web interface
+  sudo reprinter-web uninstall [--purge] remove the web interface service
+  reprinter-web [serve] [options]        run the web interface (what the service runs)
 
+`reprinter-web install --help` lists the install options.
+
+Options for serve:
   --config PATH       settings file (default /var/lib/reprinter/config.toml);
                       uploads are kept in an uploads/ directory next to it
-  --share-dir PATH    directory with reprinter's printers/ and drivers/
-                      (default /usr/local/share/reprinter)
   --listen ADDR       listen address, overriding the settings file (e.g. 127.0.0.1:8631)
+  --share-dir PATH    read printer profiles from a reprinter checkout (its printers/ and
+                      drivers/) instead of the ones built into this binary
   --cups-socket PATH  CUPS scheduler socket (default /run/cups/cups.sock)
   --clear-password    remove the admin password from the settings file and exit
   -V, --version       print the version and exit
@@ -47,7 +60,7 @@ pub struct AppState {
     pub config_path: PathBuf,
     /// The address actually listened on (config or --listen).
     pub listen: String,
-    pub share_dir: PathBuf,
+    pub profiles: profiles::Source,
     pub hostname: String,
     pub uploads: uploads::Uploads,
     pub sessions: auth::Sessions,
@@ -83,26 +96,30 @@ impl AppState {
 
 struct Args {
     config: PathBuf,
-    share_dir: PathBuf,
+    share_dir: Option<PathBuf>,
     listen: Option<String>,
     cups_socket: PathBuf,
     clear_password: bool,
 }
 
-fn parse_args() -> Result<Args, String> {
+fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut args = Args {
         config: "/var/lib/reprinter/config.toml".into(),
-        share_dir: "/usr/local/share/reprinter".into(),
+        share_dir: None,
         listen: None,
         cups_socket: "/run/cups/cups.sock".into(),
         clear_password: false,
     };
-    let mut argv = std::env::args().skip(1);
+    let mut argv = argv.iter();
     while let Some(arg) = argv.next() {
-        let mut value = || argv.next().ok_or_else(|| format!("{arg} needs a value"));
+        let mut value = || {
+            argv.next()
+                .cloned()
+                .ok_or_else(|| format!("{arg} needs a value"))
+        };
         match arg.as_str() {
             "--config" => args.config = value()?.into(),
-            "--share-dir" => args.share_dir = value()?.into(),
+            "--share-dir" => args.share_dir = Some(value()?.into()),
             "--listen" => args.listen = Some(value()?),
             "--cups-socket" => args.cups_socket = value()?.into(),
             "--clear-password" => args.clear_password = true,
@@ -123,6 +140,45 @@ fn parse_args() -> Result<Args, String> {
 fn fail(message: impl std::fmt::Display) -> ! {
     eprintln!("reprinter-web: {message}");
     std::process::exit(1);
+}
+
+fn main() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let result = match argv.first().map(String::as_str) {
+        Some("install") => setup::install(&argv[1..]),
+        Some("uninstall") => setup::uninstall(&argv[1..]),
+        Some("serve") => serve_main(&argv[1..]),
+        _ => serve_main(&argv),
+    };
+    if let Err(e) = result {
+        fail(e);
+    }
+}
+
+fn serve_main(argv: &[String]) -> Result<(), String> {
+    let args = parse_args(argv).unwrap_or_else(|e| {
+        eprintln!("reprinter-web: {e}\n\n{USAGE}");
+        std::process::exit(2);
+    });
+    let config = Config::load(&args.config)?;
+
+    if args.clear_password {
+        let config = Config {
+            admin_password_hash: String::new(),
+            ..config
+        };
+        config
+            .save(&args.config)
+            .map_err(|e| format!("{}: {e}", args.config.display()))?;
+        println!("Admin password removed from {}.", args.config.display());
+        return Ok(());
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?
+        .block_on(serve(args, config))
 }
 
 /// The user this process runs as, for IPP PeerCred authentication.
@@ -151,39 +207,26 @@ async fn shutdown_signal() {
     eprintln!("reprinter-web: shutting down");
 }
 
-#[tokio::main]
-async fn main() {
-    let args = parse_args().unwrap_or_else(|e| {
-        eprintln!("reprinter-web: {e}\n\n{USAGE}");
-        std::process::exit(2);
-    });
-    let config = Config::load(&args.config).unwrap_or_else(|e| fail(e));
-
-    if args.clear_password {
-        let config = Config {
-            admin_password_hash: String::new(),
-            ..config
-        };
-        config
-            .save(&args.config)
-            .unwrap_or_else(|e| fail(format!("{}: {e}", args.config.display())));
-        println!("Admin password removed from {}.", args.config.display());
-        return;
-    }
-
+async fn serve(args: Args, config: Config) -> Result<(), String> {
     let upload_dir = args
         .config
         .parent()
         .map(|d| d.join("uploads"))
         .unwrap_or_else(|| "uploads".into());
     let uploads = uploads::Uploads::new(upload_dir.clone())
-        .unwrap_or_else(|e| fail(format!("{}: {e}", upload_dir.display())));
-    if !args.share_dir.join("printers").is_dir() {
-        eprintln!(
-            "reprinter-web: warning: no printer profiles in {}/printers; \"Add a printer\" will be empty (see --share-dir)",
-            args.share_dir.display()
-        );
-    }
+        .map_err(|e| format!("{}: {e}", upload_dir.display()))?;
+    let profiles = match args.share_dir {
+        Some(dir) => {
+            if !dir.join("printers").is_dir() {
+                eprintln!(
+                    "reprinter-web: warning: {}/printers does not exist",
+                    dir.display()
+                );
+            }
+            profiles::Source::Dir(dir)
+        }
+        None => profiles::Source::Embedded,
+    };
     let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|h| h.trim().to_string())
         .unwrap_or_else(|_| "localhost".into());
@@ -193,7 +236,7 @@ async fn main() {
         config: RwLock::new(config),
         config_path: args.config,
         listen: listen.clone(),
-        share_dir: args.share_dir,
+        profiles,
         hostname,
         uploads,
         sessions: auth::Sessions::default(),
@@ -216,7 +259,7 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
-        .unwrap_or_else(|e| fail(format!("cannot listen on {listen}: {e}")));
+        .map_err(|e| format!("cannot listen on {listen}: {e}"))?;
     eprintln!(
         "reprinter-web {VERSION} listening on http://{listen}/ (uploads in {})",
         state.uploads.dir().display()
@@ -224,5 +267,5 @@ async fn main() {
     axum::serve(listener, routes::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .unwrap_or_else(|e| fail(e));
+        .map_err(|e| e.to_string())
 }

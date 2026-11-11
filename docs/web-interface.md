@@ -18,61 +18,79 @@ changes is ordinary CUPS configuration.
 
 ## Install
 
-Run [install.sh](../README.md#quick-start) first, then, on the same host and
-as your user (not with sudo; it asks for sudo where needed):
+`reprinter-web` is a single file. It contains the web interface and
+reprinter's installer (`install.sh` with `lib/`, `drivers/` and
+`printers/`), so one command sets up the whole print server:
 
 ```sh
-./install-web.sh
+curl -fLo reprinter-web https://github.com/jinuthankachan/reprinter/releases/latest/download/reprinter-web-$(dpkg --print-architecture)
+chmod +x reprinter-web
+sudo ./reprinter-web install
 ```
 
 Then open `http://<host>:8631/`.
 
-`install-web.sh`:
+`reprinter-web install`:
 
-1. Builds `reprinter-web` with `cargo build --release` (or installs the
-   binary given with `--bin`) to `/usr/local/bin/reprinter-web`.
-2. Copies `printers/` and `drivers/` to `/usr/local/share/reprinter/` for
-   "Add a printer".
+1. Runs the built-in `install.sh`: CUPS, the printer's driver, and a shared
+   queue for the printer on USB (see the [README](../README.md#quick-start)).
+   It is unpacked into a private temporary directory and removed afterwards.
+2. Copies itself to `/usr/local/bin/reprinter-web`.
 3. Creates the `reprinter` system user and adds it to `lpadmin`.
 4. Writes `/var/lib/reprinter/config.toml` if it does not exist.
-5. Installs and starts the `reprinter-web` systemd service, and opens the
+5. Installs and starts the `reprinter-web` systemd service, and opens its
    port in `ufw` or `firewalld` if one is active.
 
 | Option | Meaning |
 |--------|---------|
-| `--bin PATH` | Install this binary instead of building one |
-| `--port PORT` | Listen on this port (default 8631, or the port already configured). Port 80 works too. |
-| `--local` | Listen on 127.0.0.1 only |
-| `--uninstall` | Stop and remove the service; the settings in `/var/lib/reprinter` are kept |
+| `-p`, `--printer ID`, `-q`, `--queue NAME`, `--paper SIZE`, `--uri URI`, `--from-source` | Passed to `install.sh` (see the README's option table) |
+| `-l`, `--list` | List supported printers, and whether each is connected |
+| `--local` | Printer not shared on the network, and the web interface on 127.0.0.1 only |
+| `--port PORT` | Web interface port (default 8631, or the port already configured). Port 80 works too. |
+| `--web-only` | Skip the printer setup (CUPS and a queue are already there, e.g. from `install.sh`) |
 
-Rerunning is safe: it reinstalls the binary and profiles and restarts the
-service, keeping the settings.
-
-### Getting a binary
-
-Building needs Rust 1.85 or newer:
-
-- **Debian 13 / Raspberry Pi OS Trixie**: `sudo apt install cargo`.
-- **Older releases** (Debian 12, Ubuntu 22.04/24.04, Raspberry Pi OS
-  Bookworm): their packaged Rust is too old; install it with
-  [rustup](https://rustup.rs).
-
-Compiling on a Raspberry Pi 3B works but is slow. Alternatively build on a
-PC for the Pi's architecture, for example with
-[cross](https://github.com/cross-rs/cross), and install the result:
+Rerunning is safe: `install.sh` updates the queue in place, and the binary,
+unit and service are replaced while the settings are kept. To update
+reprinter-web, run the new binary's `install` (with `--web-only` to skip
+the printer part).
 
 ```sh
-cd web
-cross build --release --target aarch64-unknown-linux-gnu   # 64-bit Pi OS
-cross build --release --target armv7-unknown-linux-gnueabihf  # 32-bit Pi OS
-scp target/aarch64-unknown-linux-gnu/release/reprinter-web <user>@printpi.local:
-# on the Pi:
-./install-web.sh --bin ~/reprinter-web
+sudo reprinter-web uninstall            # stop and remove the service and binary
+sudo reprinter-web uninstall --purge    # also the settings and the reprinter user
 ```
 
-A binary built natively on one machine needs a glibc at least as new as
-that machine's on the target; building on the oldest release you deploy to
-(or with `cross`) avoids surprises.
+Printers, CUPS and drivers stay; the README's Uninstall section removes them.
+
+### The binaries
+
+There is one per architecture, named after `dpkg --print-architecture`:
+
+| File | Hosts |
+|------|-------|
+| `reprinter-web-amd64` | 64-bit PCs |
+| `reprinter-web-arm64` | 64-bit Raspberry Pi OS and other 64-bit ARM boards |
+| `reprinter-web-armhf` | 32-bit Raspberry Pi OS (ARMv6 and newer, so every Pi) and other 32-bit ARM |
+
+They are statically linked (musl), so they do not depend on the host's C
+library and run on every supported Debian, Ubuntu and Raspberry Pi OS
+release. Check them against `SHA256SUMS` from the same release:
+`sha256sum -c --ignore-missing SHA256SUMS`.
+
+Pushing a version tag (`git tag v0.1.0 && git push origin v0.1.0`) builds
+and publishes them (`.github/workflows/release.yml`). To build them
+yourself, on any Linux PC with [rustup](https://rustup.rs):
+
+```sh
+web/build-release.sh          # web/dist/reprinter-web-{amd64,arm64,armhf} and SHA256SUMS
+web/build-release.sh arm64    # one architecture
+```
+
+No cross compiler is needed: Rust's own linker (`rust-lld`) links the musl
+targets. Then copy the file to the host, e.g.
+`scp web/dist/reprinter-web-arm64 <user>@printpi.local:reprinter-web`.
+
+During development, `cargo run -- --share-dir ..` (from `web/`) reads the
+printer profiles from the checkout instead of the built-in copy.
 
 ## Using it
 
@@ -148,10 +166,10 @@ sudo systemctl restart reprinter-web
 |---------|-------|
 | Page does not load | `systemctl status reprinter-web`, `journalctl -u reprinter-web`. Firewall: open the port (8631/tcp). |
 | "cannot reach CUPS" | `systemctl status cups`. The service talks to `/run/cups/cups.sock`. |
-| Changing a printer says "Forbidden" or "Unauthorized" | The `reprinter` user must be in `lpadmin`: `id reprinter`. Rerun `./install-web.sh`. |
+| Changing a printer says "Forbidden" or "Unauthorized" | The `reprinter` user must be in `lpadmin`: `id reprinter`. Rerun `sudo reprinter-web install --web-only`. |
 | Network sharing: "CUPS on this server only lets root change these settings" | Some CUPS builds (Ubuntu 24.04) refuse configuration changes from anyone but root, whatever their groups. Run the `sudo cupsctl ...` command shown on the page. |
-| "Add a printer" lists nothing | The profiles live in `/usr/local/share/reprinter/printers`; rerun `./install-web.sh` after adding one. |
-| "Driver not installed" | `./install.sh --printer <id>` installs it. |
+| A new printer profile is missing from "Add a printer" | The profiles are built into the binary: rebuild it (`web/build-release.sh`) and run its `install --web-only`. |
+| "Driver not installed" | `sudo reprinter-web install --printer <id>` installs it. |
 | Upload refused as too large | Settings → Web interface → Upload limit. |
 | A job fails | Same as any CUPS job: the printer's page under [printers/](printers/), and `/var/log/cups/error_log`. |
 
@@ -169,6 +187,8 @@ browser ──HTTP──> reprinter-web ──IPP over /run/cups/cups.sock──
   `drivers/*.sh` without executing them; `routes/` has the HTTP API.
 - `web/static/`: the page, plain HTML, CSS and JavaScript with no build step,
   embedded in the binary.
+- `web/build.rs` embeds `install.sh`, `lib/`, `drivers/` and `printers/`;
+  `setup.rs` implements `install` and `uninstall` around them.
 - Documents go to `lp` on standard input with an explicit
   `document-format`, so CUPS never has to guess the file type.
 
@@ -196,9 +216,9 @@ cd web && cargo test     # unit tests: IPP encoding, parsers, validation, lp arg
 tests/web-test.sh        # end to end in Docker (Debian 13, Ubuntu 24.04), no printer needed
 ```
 
-`tests/web-test.sh` builds the binary, runs `install.sh` and
-`install-web.sh` in a container, adds a queue whose backend writes jobs to
-files, and drives the API with `curl`: uploads, printing with a page setup,
-queue and cancel, printer settings, adding a printer from a profile, CUPS
-sharing, the admin password and upload limits. The binary is built on the
-host, so the images need a glibc at least as new as the host's.
+`tests/web-test.sh` builds the static amd64 binary and puts only that file
+into each container (no checkout), runs `reprinter-web install`, adds a queue
+whose backend writes jobs to files, and drives the API with `curl`: uploads,
+printing with a page setup, queue and cancel, printer settings, adding a
+printer from a profile, CUPS sharing, the admin password and upload limits.
+It ends with a `--web-only` rerun and `uninstall --purge`.

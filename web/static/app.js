@@ -687,11 +687,11 @@ const PAPERS = [['a4', 'A4'], ['letter', 'US Letter'], ['legal', 'US Legal'], ['
 
 function addPrinterCard(printers) {
   const body = h('div', {}, h('p', { class: 'muted' }, 'Looking for supported printers…'));
-  api('GET', '/admin/profiles').then(({ profiles, share_dir }) => {
+  api('GET', '/admin/profiles').then(({ profiles, source }) => {
     body.replaceChildren(...(profiles.length
       ? [h('p', { class: 'hint' }, 'Printers reprinter has a profile for. Plug the printer in and switch it on first.'),
          h('ul', { class: 'profiles' }, profiles.map((pr) => profileRow(pr, printers)))]
-      : [h('p', { class: 'muted' }, `No printer profiles found in ${share_dir}/printers.`)]));
+      : [h('p', { class: 'muted' }, `No printer profiles found (${source}).`)]));
   }).catch((e) => body.replaceChildren(h('p', { class: 'notice error' }, e.message)));
   return h('section', { class: 'card' }, h('h2', {}, 'Add a printer'), body);
 }
@@ -715,7 +715,7 @@ function profileRow(pr, printers) {
         !pr.driver_installed && h('span', { class: 'pill warn' }, 'Driver not installed')),
       setup),
     !pr.driver_installed && h('p', { class: 'hint' },
-      'Install the driver first. On the server: ', h('code', {}, `./install.sh --printer ${pr.id}`)),
+      'Install the driver first. On the server: ', h('code', {}, `sudo reprinter-web install --printer ${pr.id}`)),
     slot);
 }
 
