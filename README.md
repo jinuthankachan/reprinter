@@ -33,7 +33,25 @@ Raspberry Pi, start with [docs/raspberry-pi.md](docs/raspberry-pi.md).
 
 ## Quick start
 
-On the host the printer is plugged into (printer connected and powered on):
+On the host the printer is plugged into (printer connected and powered on),
+as a user with sudo rights. Either way sets up the same print server.
+
+**One file**, with the [web interface](#web-interface):
+
+```sh
+curl -fLo reprinter-web https://github.com/jinuthankachan/reprinter/releases/latest/download/reprinter-web-$(dpkg --print-architecture)
+chmod +x reprinter-web
+sudo ./reprinter-web install
+```
+
+`reprinter-web` carries `install.sh` and every printer profile inside it, so
+nothing else is needed: it runs the steps below, then installs itself as the
+web interface service. It takes the same options as `install.sh` plus a few
+of its own (`./reprinter-web install --help`). The binaries (`amd64`,
+`arm64`, `armhf`) are static and run on every supported release; the release
+page has their `SHA256SUMS`. To build them yourself: `web/build-release.sh`.
+
+**From the repository**, print server only:
 
 ```sh
 git clone https://github.com/jinuthankachan/reprinter.git
@@ -41,8 +59,8 @@ cd reprinter
 ./install.sh
 ```
 
-Run it as a user with sudo rights, or as root. No git on the host? Copy the
-directory over instead: `scp -r reprinter <user>@<host>:`.
+No git on the host? Copy the directory over instead:
+`scp -r reprinter <user>@<host>:`.
 
 `install.sh` does the following:
 
@@ -94,13 +112,11 @@ lpstat -o
 
 ## Web interface
 
-Optionally, add a web page for printing and settings:
+`sudo ./reprinter-web install` (see [Quick start](#quick-start)) also sets up
+a web page for printing and settings. Already set up with `install.sh`? Add
+just the web interface with `sudo ./reprinter-web install --web-only`.
 
-```sh
-./install-web.sh
-```
-
-Then open `http://<host>:8631/` from any browser, phone included. Upload a
+Open `http://<host>:8631/` from any browser, phone included. Upload a
 PDF, image or text file, choose the page setup (copies, pages, paper size,
 orientation, scaling, pages per sheet, the printer's own options, and
 two-sided printing by hand for printers without a duplexer) and print it.
@@ -109,9 +125,7 @@ defaults and sharing, adds printers from the profiles in `printers/`, and
 sets an admin password. Set that password: until then anyone on the network
 can change the settings.
 
-It needs Rust 1.85+ to build (`sudo apt install cargo` on Debian 13, or
-[rustup](https://rustup.rs)), or a binary built elsewhere (`--bin`). Details,
-cross-compiling for a Pi and security notes:
+Details, options and security notes:
 [docs/web-interface.md](docs/web-interface.md).
 
 ## Adding the printer on clients
@@ -184,7 +198,7 @@ on the server).
 For the default LBP-1210 setup:
 
 ```sh
-./install-web.sh --uninstall   # if the web interface is installed
+sudo reprinter-web uninstall --purge   # if the web interface is installed
 sudo lpadmin -x LBP1210
 sudo apt remove captppd
 sudo rm /etc/modprobe.d/blacklist-usblp.conf
@@ -195,12 +209,13 @@ sudo cupsctl --no-remote-any --no-remote-admin --no-share-printers
 
 ```
 install.sh               entry point
-install-web.sh           installs the web interface as a systemd service
 lib/common.sh            platform detection, packages, services
 lib/cups.sh              CUPS stack, sharing, firewall, device discovery, queue
 drivers/<driver>.sh      one module per driver: install, host tweaks, diagnostics
 printers/<id>.conf       one profile per printer model
-web/                     the web interface: Rust server (src/), page (static/), systemd unit
+web/                     reprinter-web: web interface and one-file installer (src/, static/,
+                         systemd unit, build-release.sh); embeds install.sh, lib/, drivers/, printers/
+.github/workflows/       release builds of the reprinter-web binaries
 docs/                    host guides, printer notes, web interface, contributor guide
 tests/container-test.sh  Docker smoke tests (no printer needed)
 tests/web-test.sh        Docker end-to-end tests of the web interface
@@ -218,5 +233,5 @@ containers and creates the queue on a fake device URI):
 tests/container-test.sh                          # Debian 12/13, Ubuntu 22.04/24.04
 FROM_SOURCE=1 tests/container-test.sh debian:13  # source-build path
 (cd web && cargo test)                           # web interface unit tests
-tests/web-test.sh                                # web interface end to end (Debian 13, Ubuntu 24.04)
+tests/web-test.sh                                # reprinter-web end to end (Debian 12/13, Ubuntu 22.04/24.04)
 ```

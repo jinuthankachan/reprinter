@@ -1,15 +1,63 @@
 //! Printer profiles (`printers/<id>.conf`) and driver modules
 //! (`drivers/<name>.sh`), the same files install.sh uses.
 //!
-//! They are bash files of plain assignments (docs/adding-a-printer.md), so a
-//! small parser for `NAME=value` lines is enough; nothing is executed.
+//! They come built into the binary (see build.rs), or from a reprinter
+//! checkout given with --share-dir. They are bash files of plain assignments
+//! (docs/adding-a-printer.md), so a small parser for `NAME=value` lines is
+//! enough; nothing is executed.
 
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::PathBuf,
 };
 
 use serde::Serialize;
+
+use crate::embedded;
+
+/// Where the profiles and driver modules are read from.
+pub enum Source {
+    Embedded,
+    Dir(PathBuf),
+}
+
+impl Source {
+    /// Files directly inside `dir` ("printers", "drivers"): (name, contents).
+    fn files(&self, dir: &str) -> Vec<(String, String)> {
+        match self {
+            Source::Embedded => embedded::list(dir)
+                .map(|(n, t)| (n.to_string(), t.to_string()))
+                .collect(),
+            Source::Dir(root) => std::fs::read_dir(root.join(dir))
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter(|e| e.path().is_file())
+                        .filter_map(|e| {
+                            let name = e.file_name().to_str()?.to_string();
+                            Some((name, std::fs::read_to_string(e.path()).ok()?))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    fn read(&self, path: &str) -> Option<String> {
+        match self {
+            Source::Embedded => embedded::get(path).map(str::to_string),
+            Source::Dir(root) => std::fs::read_to_string(root.join(path)).ok(),
+        }
+    }
+
+    /// For messages: where the profiles come from.
+    pub fn describe(&self) -> String {
+        match self {
+            Source::Embedded => "built into reprinter-web".to_string(),
+            Source::Dir(root) => format!("{}/printers", root.display()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Profile {
@@ -26,25 +74,17 @@ pub struct Profile {
     pub uri_scheme: String,
 }
 
-/// All valid profiles under `<share_dir>/printers`, sorted by id. Broken
-/// profiles are logged and skipped.
-pub fn load_all(share_dir: &Path) -> Vec<Profile> {
-    let Ok(entries) = std::fs::read_dir(share_dir.join("printers")) else {
-        return Vec::new();
-    };
-    let mut list: Vec<Profile> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension()? != "conf" {
-                return None;
-            }
-            let id = path.file_stem()?.to_str()?.to_string();
-            let text = std::fs::read_to_string(&path).ok()?;
-            match parse_profile(&id, &text, share_dir) {
+/// All valid profiles, sorted by id. Broken profiles are logged and skipped.
+pub fn load_all(source: &Source) -> Vec<Profile> {
+    let mut list: Vec<Profile> = source
+        .files("printers")
+        .into_iter()
+        .filter_map(|(name, text)| {
+            let id = name.strip_suffix(".conf")?;
+            match parse_profile(id, &text, source) {
                 Ok(p) => Some(p),
                 Err(e) => {
-                    eprintln!("profile {}: {e}", path.display());
+                    eprintln!("profile {name}: {e}");
                     None
                 }
             }
@@ -54,11 +94,11 @@ pub fn load_all(share_dir: &Path) -> Vec<Profile> {
     list
 }
 
-pub fn find(share_dir: &Path, id: &str) -> Option<Profile> {
-    load_all(share_dir).into_iter().find(|p| p.id == id)
+pub fn find(source: &Source, id: &str) -> Option<Profile> {
+    load_all(source).into_iter().find(|p| p.id == id)
 }
 
-fn parse_profile(id: &str, text: &str, share_dir: &Path) -> Result<Profile, String> {
+fn parse_profile(id: &str, text: &str, source: &Source) -> Result<Profile, String> {
     let vars = parse_assignments(text);
     let get = |k: &str| vars.get(k).cloned().unwrap_or_default();
     for key in [
@@ -79,11 +119,10 @@ fn parse_profile(id: &str, text: &str, share_dir: &Path) -> Result<Profile, Stri
     {
         return Err(format!("invalid driver name {driver}"));
     }
-    let uri_scheme =
-        std::fs::read_to_string(share_dir.join("drivers").join(format!("{driver}.sh")))
-            .ok()
-            .and_then(|t| parse_assignments(&t).remove("DRIVER_URI_SCHEME"))
-            .unwrap_or_default();
+    let uri_scheme = source
+        .read(&format!("drivers/{driver}.sh"))
+        .and_then(|t| parse_assignments(&t).remove("DRIVER_URI_SCHEME"))
+        .unwrap_or_default();
     Ok(Profile {
         id: id.to_string(),
         model: get("PRINTER_MODEL"),
@@ -211,18 +250,28 @@ driver_install() {
     #[test]
     fn repository_profiles_load() {
         // The crate lives in web/; the profiles in the repository root.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let profiles = load_all(root);
-        let lbp = profiles
-            .iter()
-            .find(|p| p.id == "canon-lbp1210")
-            .expect("canon-lbp1210 profile");
-        assert_eq!(lbp.driver, "captppd");
-        assert_eq!(lbp.uri_scheme, "captusb");
-        assert_eq!(lbp.usb_ids, vec!["04a9:2617"]);
-        assert_eq!(lbp.options, vec!["Resolution=600dpi"]);
-        let re = regex::Regex::new(&lbp.uri_regex).unwrap();
-        assert!(re.is_match("captusb://Canon/LBP1210?drv=capt&serial=0001"));
-        assert!(!re.is_match("captusb://Canon/LBP3200?drv=capt"));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let from_dir = load_all(&Source::Dir(root.to_path_buf()));
+        let embedded = load_all(&Source::Embedded);
+        assert_eq!(
+            from_dir.iter().map(|p| &p.id).collect::<Vec<_>>(),
+            embedded.iter().map(|p| &p.id).collect::<Vec<_>>(),
+            "the built-in profiles match the checkout"
+        );
+        for profiles in [from_dir, embedded] {
+            let lbp = profiles
+                .iter()
+                .find(|p| p.id == "canon-lbp1210")
+                .expect("canon-lbp1210 profile");
+            assert_eq!(lbp.driver, "captppd");
+            assert_eq!(lbp.uri_scheme, "captusb");
+            assert_eq!(lbp.usb_ids, vec!["04a9:2617"]);
+            assert_eq!(lbp.options, vec!["Resolution=600dpi"]);
+            let re = regex::Regex::new(&lbp.uri_regex).unwrap();
+            assert!(re.is_match("captusb://Canon/LBP1210?drv=capt&serial=0001"));
+            assert!(!re.is_match("captusb://Canon/LBP3200?drv=capt"));
+        }
     }
 }

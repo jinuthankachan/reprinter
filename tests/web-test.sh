@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# End-to-end test of the web interface in throwaway Docker containers. No
-# printer needed: install.sh sets up CUPS and the LBP-1210 queue on a fake
-# device URI, a second queue prints into files through a capture backend, and
-# reprinter-web runs as its service user while the API is exercised with curl.
+# End-to-end test of reprinter-web in throwaway Docker containers. No printer
+# needed. Only the binary goes into the container (no repository checkout),
+# so this also proves it is self-contained: `reprinter-web install` sets up
+# CUPS, the driver and the LBP-1210 queue on a fake device URI, and itself as
+# the service. A second queue prints into files through a capture backend,
+# and the API is exercised with curl while reprinter-web runs as its service
+# user. Ends with `reprinter-web uninstall --purge`.
 #
-#   tests/web-test.sh                      # debian:13 and ubuntu:24.04
+#   tests/web-test.sh                      # Debian 12/13, Ubuntu 22.04/24.04
 #   tests/web-test.sh debian:13            # chosen images
 #   BIN=path/to/reprinter-web tests/web-test.sh
 #
-# The binary is built on this machine (cargo build --release) unless BIN is
-# given, so the images need a glibc at least as new as this machine's.
+# Unless BIN is given, the static amd64 binary is built here (musl, so it
+# runs on every image regardless of its glibc).
 
 set -euo pipefail
 
@@ -17,11 +20,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 read -r -a DOCKER_OPTS <<<"${DOCKER_OPTS:-}"
 
 images=("$@")
-[ ${#images[@]} -gt 0 ] || images=(debian:13 ubuntu:24.04)
+[ ${#images[@]} -gt 0 ] || images=(debian:12 debian:13 ubuntu:22.04 ubuntu:24.04)
 
 if [ -z "${BIN:-}" ]; then
-  (cd "$ROOT/web" && cargo build --release --locked)
-  BIN="$ROOT/web/target/release/reprinter-web"
+  "$ROOT/web/build-release.sh" amd64 >/dev/null
+  BIN="$ROOT/web/dist/reprinter-web-amd64"
 fi
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 
@@ -31,9 +34,18 @@ check='
 set -euo pipefail
 expect() { if eval "$1" >/dev/null 2>&1; then echo "ok   $1"; else echo "FAIL $1"; [ -f /tmp/web.log ] && tail -20 /tmp/web.log; exit 1; fi; }
 
-echo "--- install.sh (CUPS, driver, LBP1210 queue on a fake URI)"
-/src/install.sh --printer canon-lbp1210 --uri "captusb://Test/CONTAINER?serial=CONTAINER" >/tmp/install.log 2>&1 ||
-  { tail -30 /tmp/install.log; exit 1; }
+echo "--- reprinter-web install: CUPS, driver, LBP1210 queue (fake URI) and the web interface in one step"
+expect "/opt/reprinter-web install --list | grep -q canon-lbp1210"
+/opt/reprinter-web install --printer canon-lbp1210 --uri "captusb://Test/CONTAINER?serial=CONTAINER" >/tmp/install.log 2>&1 ||
+  { tail -40 /tmp/install.log; exit 1; }
+expect "lpstat -v LBP1210 | grep -qF captusb://Test/CONTAINER"
+expect "lpoptions -p LBP1210 | grep -q printer-is-shared=true"
+expect "id -nG reprinter | grep -qw lpadmin"
+expect "cmp -s /opt/reprinter-web /usr/local/bin/reprinter-web"
+expect "grep -q \"^ExecStart=/usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml\$\" /etc/systemd/system/reprinter-web.service"
+expect "grep -qF \"listen = \\\"0.0.0.0:8631\\\"\" /var/lib/reprinter/config.toml"
+expect "test \"\$(stat -c %U:%a /var/lib/reprinter/config.toml)\" = reprinter:600"
+expect "! ls -d /tmp/reprinter-install-*"
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq >/dev/null
 
 # A queue whose backend writes each job to /tmp/capture, with a driver that
@@ -47,17 +59,8 @@ EOF
 chmod 755 /usr/lib/cups/backend/capture
 lpadmin -p Capture -E -v capture:/out -m drv:///sample.drv/laserjet.ppd 2>/dev/null
 
-echo "--- install-web.sh"
-/src/install-web.sh --bin /opt/reprinter-web >/tmp/install-web.log 2>&1 || { cat /tmp/install-web.log; exit 1; }
-expect "id -nG reprinter | grep -qw lpadmin"
-expect "test -x /usr/local/bin/reprinter-web"
-expect "test -f /usr/local/share/reprinter/printers/canon-lbp1210.conf"
-expect "grep -qF \"listen = \\\"0.0.0.0:8631\\\"\" /var/lib/reprinter/config.toml"
-expect "test \"\$(stat -c %U:%a /var/lib/reprinter/config.toml)\" = reprinter:600"
-
 # No systemd in the container: start it the way the unit does.
-runuser -u reprinter -- /usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml \
-  --share-dir /usr/local/share/reprinter >/tmp/web.log 2>&1 &
+runuser -u reprinter -- /usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml >/tmp/web.log 2>&1 &
 for _ in $(seq 1 50); do curl -fs -o /dev/null http://127.0.0.1:8631/api/session && break; sleep 0.2; done
 
 B=http://127.0.0.1:8631/api
@@ -187,13 +190,26 @@ expect "test \"\$(code -X DELETE -H X-Reprinter:1 $B/uploads/$pdf)\" = 204"
 expect "test \"\$(code $B/uploads/$pdf)\" = 404"
 expect "test ! -e /var/lib/reprinter/uploads/$pdf"
 expect "! grep -q \"^error:\" /tmp/web.log"
+
+echo "--- rerun with --web-only, then uninstall"
+/usr/local/bin/reprinter-web install --web-only --port 8632 >/tmp/reinstall.log 2>&1 || { cat /tmp/reinstall.log; exit 1; }
+expect "grep -qF \"listen = \\\"0.0.0.0:8632\\\"\" /var/lib/reprinter/config.toml"
+expect "grep -q \"max_upload_mb = 1\$\" /var/lib/reprinter/config.toml"
+pkill -x reprinter-web || true
+sleep 0.5
+/opt/reprinter-web uninstall --purge >/tmp/uninstall.log 2>&1 || { cat /tmp/uninstall.log; exit 1; }
+expect "test ! -e /usr/local/bin/reprinter-web"
+expect "test ! -e /etc/systemd/system/reprinter-web.service"
+expect "test ! -e /var/lib/reprinter"
+expect "! id reprinter"
+expect "lpstat -v LBP1210"
 echo PASS
 '
 
 failed=()
 for img in "${images[@]}"; do
   echo "=================== $img"
-  if docker run --rm "${DOCKER_OPTS[@]}" -v "$ROOT:/src:ro" -v "$BIN:/opt/reprinter-web:ro" \
+  if docker run --rm "${DOCKER_OPTS[@]}" -v "$BIN:/opt/reprinter-web:ro" \
     "$img" bash -c "$check"; then
     echo "=================== $img: PASS"
   else

@@ -1,4 +1,4 @@
-# reprinter web interface. Installed by install-web.sh.
+# reprinter web interface. Installed by `reprinter-web install`.
 #
 # Runs as the unprivileged "reprinter" user. That user is in the lpadmin
 # group, which is what lets it change printers through the CUPS tools: CUPS
@@ -13,7 +13,7 @@ Wants=network-online.target cups.service
 Type=exec
 User=reprinter
 Group=reprinter
-ExecStart=/usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml --share-dir /usr/local/share/reprinter
+ExecStart=/usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml
 Restart=on-failure
 RestartSec=2
 StateDirectory=reprinter

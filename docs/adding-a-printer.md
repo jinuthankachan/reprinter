@@ -34,14 +34,16 @@ Example: the Canon LBP3200, which captppd already supports.
    a multi-page PDF and a second job after the first finished.
 6. Add `docs/printers/<id>.md` (copy the LBP-1210 page) and a row to the
    "Supported printers" table in the README.
-7. If the web interface is installed, rerun `./install-web.sh` so that
-   Settings → "Add a printer" lists the new profile.
+7. `reprinter-web` has the profiles built in: rebuild it
+   (`web/build-release.sh`) so that `reprinter-web install` and Settings →
+   "Add a printer" know the new printer. While testing,
+   `reprinter-web --share-dir <checkout>` reads them from the checkout.
 
 ### Profile fields
 
 Profiles are bash files sourced by `install.sh`; keep them to plain
-assignments. The web interface reads them without running bash, so values
-must be literal (quoted or bare words, no `$variables` or command
+assignments. `reprinter-web` reads them (and the driver modules'
+`DRIVER_URI_SCHEME`) without running bash, so values must be literal (quoted or bare words, no `$variables` or command
 substitution).
 
 | Field | Required | Meaning |

@@ -320,7 +320,7 @@ pub struct ProfileInfo {
 }
 
 pub async fn profiles(_: Admin, State(st): State<Arc<AppState>>) -> Result<Json<Value>> {
-    let list = profiles::load_all(&st.share_dir);
+    let list = profiles::load_all(&st.profiles);
     let usb = profiles::usb_devices();
     let models = if list.is_empty() {
         Default::default()
@@ -341,12 +341,12 @@ pub async fn profiles(_: Admin, State(st): State<Arc<AppState>>) -> Result<Json<
         })
         .collect();
     Ok(Json(
-        json!({ "share_dir": st.share_dir.display().to_string(), "profiles": list }),
+        json!({ "source": st.profiles.describe(), "profiles": list }),
     ))
 }
 
 fn find_profile(st: &AppState, id: &str) -> Result<Profile> {
-    profiles::find(&st.share_dir, id)
+    profiles::find(&st.profiles, id)
         .ok_or_else(|| AppError::not_found(format!("no printer profile {id}")))
 }
 
@@ -411,7 +411,7 @@ pub async fn create_printer(
     }
     if profile.ppd != "everywhere" && !cups::models().await?.contains(&profile.ppd) {
         return Err(AppError::bad_request(format!(
-            "the {} driver is not installed. On the server, run: ./install.sh --printer {}",
+            "the {} driver is not installed. On the server, run: sudo reprinter-web install --printer {}",
             profile.driver, profile.id
         )));
     }

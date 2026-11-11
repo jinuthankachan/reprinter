@@ -30,7 +30,16 @@ time. 32-bit Bookworm and both 64-bit releases use the prebuilt package.
 
 ## Step 2: install
 
-Plug in and power on the printer, then on the Pi:
+Plug in and power on the printer, then on the Pi, either the one-file
+install (print server plus the [web interface](web-interface.md)):
+
+```sh
+curl -fLo reprinter-web https://github.com/jinuthankachan/reprinter/releases/latest/download/reprinter-web-$(dpkg --print-architecture)
+chmod +x reprinter-web
+sudo ./reprinter-web install
+```
+
+or the print server alone from the repository:
 
 ```sh
 sudo apt install -y git      # if it is not there yet
@@ -41,6 +50,9 @@ cd reprinter
 
 Or copy the directory from another machine with
 `scp -r reprinter <user>@printpi.local:`.
+
+`dpkg --print-architecture` picks the right file: `arm64` on 64-bit
+Raspberry Pi OS, `armhf` on 32-bit (it runs on every Pi model).
 
 Then add the printer on each client as described in the
 [README](../README.md#adding-the-printer-on-clients).
