@@ -256,7 +256,7 @@ printers that use an existing driver only need a profile. See
 | `make test-all` | `check`, `test-install` and `test-web` |
 | `make release` | Static `reprinter-web` binaries for amd64, arm64 and armhf, with `SHA256SUMS`, in `web/dist/` |
 | `make install` | Build, then `sudo reprinter-web install` on this machine |
-| `make uninstall` | Remove the web interface service from this machine |
+| `make uninstall` | Remove the web interface service from this machine; `PURGE=1` also removes its settings and the `reprinter` user |
 | `make tag` | Tag `v<version>` from `web/Cargo.toml` for a release (does not push) |
 | `make clean` | Remove build output, `web/dist/` and `web/dev/` |
 
@@ -268,6 +268,7 @@ make release ARCHS=arm64
 make test-install IMAGES="debian:12 ubuntu:24.04"
 PROFILE=<id> make test-install                       # another printer profile
 make install INSTALL_ARGS="--printer canon-lbp1210 --paper letter"
+make uninstall PURGE=1
 ```
 
 Building needs Rust ([rustup](https://rustup.rs)); `release` and `test-web`

@@ -13,8 +13,12 @@ ARCHS        ?= amd64 arm64 armhf
 IMAGES       ?=
 PORT         ?= 8631
 INSTALL_ARGS ?=
+PURGE        ?=
 
 BIN     := web/target/release/reprinter-web
+# uninstall runs the installed binary, or this checkout's build once that is
+# gone (e.g. to purge after a plain uninstall).
+INSTALLED := $(firstword $(wildcard /usr/local/bin/reprinter-web $(BIN)))
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' web/Cargo.toml | head -n 1)
 SCRIPTS := install.sh pi-setup.sh lib/*.sh drivers/*.sh tests/*.sh web/build-release.sh
 
@@ -29,7 +33,8 @@ help: ## Show this list
 	  'ARCHS=...' 'architectures for release (default: amd64 arm64 armhf)' \
 	  'IMAGES=...' 'Docker images for the test-* targets (default: each test script'"'"'s set)' \
 	  'PORT=...' 'port for run (default: 8631)' \
-	  'INSTALL_ARGS=...' 'options for install, e.g. "--printer canon-lbp1210 --paper letter"'
+	  'INSTALL_ARGS=...' 'options for install, e.g. "--printer canon-lbp1210 --paper letter"' \
+	  'PURGE=1' 'uninstall also removes the settings and the reprinter user'
 
 build: ## Build reprinter-web for this machine (web/target/release/reprinter-web)
 	cd web && $(CARGO) build --release --locked
@@ -70,8 +75,9 @@ test-all: check test-install test-web ## All of the above
 install: build ## Set up this host: print server and web interface (sudo)
 	sudo $(BIN) install $(INSTALL_ARGS)
 
-uninstall: ## Remove the web interface service from this host (sudo)
-	sudo /usr/local/bin/reprinter-web uninstall
+uninstall: ## Remove the web interface service from this host (sudo); PURGE=1 also its settings and user
+	@test -n "$(INSTALLED)" || { echo "no reprinter-web binary: run make build first" >&2; exit 1; }
+	sudo $(INSTALLED) uninstall $(if $(PURGE),--purge)
 
 tag: ## Tag the version in web/Cargo.toml for a release (does not push)
 	@test -z "$$(git status --porcelain)" || { echo "commit your changes first" >&2; exit 1; }
