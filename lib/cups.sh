@@ -51,8 +51,12 @@ cups_configure() {
   cups_restart
 
   if [ "$SHARE" -eq 1 ]; then
-    log "Opening CUPS to the LAN and sharing printers"
-    as_root cupsctl --remote-any --remote-admin --share-printers
+    # Printing from the local network only, and CUPS administration from this
+    # host only. Other networks (--remote-any) and remote administration
+    # (--remote-admin) are left as they are: turn them on with cupsctl or the
+    # web interface's Network sharing settings if they are needed.
+    log "Sharing printers on the local network"
+    as_root cupsctl --share-printers
     firewall_open
     service_restart avahi-daemon ||
       warn "could not start avahi-daemon; clients will not auto-discover the printer (add it by IPP URL instead)"

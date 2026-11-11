@@ -69,6 +69,7 @@ pub struct AppState {
     pub hostname: String,
     pub uploads: uploads::Uploads,
     pub sessions: auth::Sessions,
+    pub login_gate: auth::LoginGate,
     pub ipp: ipp::Client,
 }
 
@@ -253,6 +254,7 @@ async fn serve(args: Args, config: Config) -> Result<(), String> {
         hostname,
         uploads,
         sessions: auth::Sessions::default(),
+        login_gate: auth::LoginGate::default(),
         ipp: ipp::Client::new(args.cups_socket, current_user().await),
     });
 

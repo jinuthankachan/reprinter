@@ -72,9 +72,9 @@ No git on the host? Copy the directory over instead:
    source when no prebuilt package fits.
 4. Applies host tweaks the driver needs (for CAPT printers, it blacklists the
    `usblp` kernel module).
-5. Adds your user to `lpadmin`, opens CUPS to the LAN and shares printers
-   (`cupsctl --remote-any --remote-admin --share-printers`), and opens IPP and
-   mDNS in `ufw` or `firewalld` if one is active.
+5. Adds your user to `lpadmin`, shares printers with the local network
+   (`cupsctl --share-printers`; CUPS administration stays on the host), and
+   opens IPP and mDNS in `ufw` or `firewalld` if one is active.
 6. Finds the printer's device URI with `lpinfo -v` and creates the shared
    queue, or updates it in place if it already exists. The new queue becomes
    the default only if the host has no default printer yet. When printing
@@ -130,10 +130,10 @@ orientation, scaling, pages per sheet, the printer's own options, and
 two-sided printing by hand for printers without a duplexer) and print it.
 The Jobs page shows, retries and cancels jobs; the Settings page changes
 printer defaults and sharing, adds printers from the profiles in `printers/`,
-cleans up unwanted printers and stuck jobs, and sets an admin password. Jobs
-that CUPS holds because printing failed are canceled after 30 minutes
-(configurable), so they cannot clog the queue. Set the admin password: until
-then anyone on the network can change the settings.
+cleans up unwanted printers and stuck jobs, and changes the admin password.
+Jobs that CUPS holds because printing failed are canceled after 30 minutes
+(configurable), so they cannot clog the queue. The Settings page needs the
+admin password that `reprinter-web install` sets and prints at the end.
 
 Details, options and security notes:
 [docs/web-interface.md](docs/web-interface.md).
@@ -181,6 +181,7 @@ the printer's page under [docs/printers/](docs/printers/).
 |---------|-------|
 | `install.sh` says no supported printer found | `./install.sh --list` shows what it looks for; `lsusb` must list the printer's USB ID. Try another cable or port, or pass `--printer`. |
 | Clients cannot see the printer | Same network / VLAN as the server; `systemctl status avahi-daemon`. Add it by IPP URL instead (above). |
+| Clients on another subnet (VPN, routed VLAN) get "Forbidden" | Sharing is limited to the server's own networks. Allow every network with `sudo cupsctl --remote-any` (or Settings → Network sharing in the web interface). |
 | Windows "cannot connect" | Use `http://`, not `https://`, and the `:631` port. |
 | Clients time out | A firewall on the server: open `631/tcp` (IPP) and `5353/udp` (mDNS). `ufw` and `firewalld` are handled automatically. |
 | A job shows "held" and nothing prints | Printing it failed and CUPS retries it every few minutes; `lpstat -l -o` shows why. Switch the printer off and on, then retry it (web interface: Retry, or `lp -i <id> -H resume`) or cancel it. |
@@ -189,20 +190,23 @@ the printer's page under [docs/printers/](docs/printers/).
 | Change defaults (toner density, toner save, paper) | CUPS web UI → Printers → `<queue>` → Administration → "Set Default Options". |
 | Anything else | `sudo cupsctl --debug-logging`, print again, read `/var/log/cups/error_log`. |
 
-CUPS web UI: `http://<host>:631/` (the Administration tab asks for your login
-on the server).
+CUPS web UI: `http://<host>:631/`. Its Administration tab works on the
+server itself (`http://localhost:631/`, asking for your login there); to
+administer CUPS from other machines, `sudo cupsctl --remote-admin`.
 
 ## Security notes
 
-- Sharing mode enables `--remote-any` and `--remote-admin`: any network that
-  can reach port 631 can print and open the CUPS web UI, and administration
-  needs the password of a user in `lpadmin`. That is fine on a home LAN. Do not
-  expose port 631 to the Internet; on such a host use `--local` or a firewall.
+- Sharing mode shares printers with the server's own networks only: devices
+  there can print and view the CUPS web UI, and CUPS administration is
+  allowed from the server only. `sudo cupsctl --remote-any` opens printing to
+  every network, and `--remote-admin` administration from other machines
+  (it needs the password of a user in `lpadmin`). Do not expose port 631 to
+  the Internet; on such a host use `--local` or a firewall.
 - Prebuilt driver packages are checked against pinned SHA-256 digests and
   source builds against a pinned upstream commit. A mismatch stops the install.
-- The web interface (port 8631) lets anyone on the network print; set an
-  admin password so that only you can change settings. It runs as an
-  unprivileged `reprinter` user in the `lpadmin` group. See
+- The web interface (port 8631) lets anyone on the network print; its
+  settings need the admin password `reprinter-web install` sets. It runs as
+  an unprivileged `reprinter` user in the `lpadmin` group. See
   [docs/web-interface.md](docs/web-interface.md#security).
 
 ## Uninstall

@@ -16,10 +16,10 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
 use crate::{
-    AppState, auth,
+    AppState,
     cups::{self, Job, PpdOption, Printer},
     error::{AppError, Result},
-    uploads::{self, Kind, RemoveOnDrop, Upload},
+    uploads::{self, Kind, Upload},
 };
 
 /// The queues, with the unwanted ones flagged (`cups::flag_unwanted`).
@@ -44,19 +44,30 @@ pub async fn options(
 const SNIFF_BYTES: usize = 8192;
 
 pub async fn upload(State(st): State<Arc<AppState>>, mut form: Multipart) -> Result<Json<Upload>> {
-    let limit = st.config().max_upload_mb * 1024 * 1024;
+    let config = st.config();
+    let limit = config.max_upload_mb * 1024 * 1024;
+    let storage = limit * uploads::STORAGE_FACTOR;
     let broken = |e: axum::extract::multipart::MultipartError| {
         AppError::bad_request(format!("upload failed: {e}"))
+    };
+    let full = || {
+        AppError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!(
+                "the server holds too many uploaded files right now; remove some or try again \
+                 later (unused files are deleted after {} minutes)",
+                config.upload_ttl_minutes
+            ),
+        )
     };
     while let Some(mut field) = form.next_field().await.map_err(broken)? {
         if field.name() != Some("file") {
             continue;
         }
         let name = uploads::clean_name(field.file_name().unwrap_or("document"));
-        let id = auth::random_hex(16);
-        let path = st.uploads.path(&id);
-        let mut cleanup = RemoveOnDrop(Some(path.clone()));
-        let mut file = tokio::fs::File::create(&path).await?;
+        // Until `finish`, any early return below deletes the file again.
+        let mut incoming = st.uploads.receive().ok_or_else(full)?;
+        let mut file = tokio::fs::File::create(&incoming.path).await?;
         let (mut size, mut head) = (0u64, Vec::with_capacity(SNIFF_BYTES));
         while let Some(chunk) = field.chunk().await.map_err(broken)? {
             size += chunk.len() as u64;
@@ -68,6 +79,9 @@ pub async fn upload(State(st): State<Arc<AppState>>, mut form: Multipart) -> Res
                         limit / 1024 / 1024
                     ),
                 ));
+            }
+            if !incoming.reserve(chunk.len() as u64, storage) {
+                return Err(full());
             }
             if head.len() < SNIFF_BYTES {
                 let n = (SNIFF_BYTES - head.len()).min(chunk.len());
@@ -89,17 +103,7 @@ pub async fn upload(State(st): State<Arc<AppState>>, mut form: Multipart) -> Res
                 ),
             )
         })?;
-        cleanup.0 = None;
-        let upload = Upload {
-            id,
-            name,
-            size,
-            kind,
-            mime,
-            used: std::time::SystemTime::now(),
-        };
-        st.uploads.insert(upload.clone());
-        return Ok(Json(upload));
+        return Ok(Json(incoming.finish(name, kind, mime)));
     }
     Err(AppError::bad_request("the upload contained no file"))
 }

@@ -46,6 +46,8 @@ expect "cmp -s /opt/reprinter-web /usr/local/bin/reprinter-web"
 expect "grep -q \"^ExecStart=/usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml\$\" /etc/systemd/system/reprinter-web.service"
 expect "grep -qF \"listen = \\\"0.0.0.0:8631\\\"\" /var/lib/reprinter/config.toml"
 expect "test \"\$(stat -c %U:%a /var/lib/reprinter/config.toml)\" = reprinter:600"
+expect "grep -q \"admin_password_hash = \\\"\\\$argon2\" /var/lib/reprinter/config.toml"
+expect "grep -qE \"^Admin password for the Settings page: [a-z0-9]{4}(-[a-z0-9]{4}){3}\$\" /tmp/install.log"
 expect "! ls -d /tmp/reprinter-install-*"
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq >/dev/null
 
@@ -84,6 +86,21 @@ send() {
 code() { curl -s -o /dev/null -w "%{http_code}" -b $J "$@"; }
 upload() { curl -fsS -H "X-Reprinter: 1" -F "file=@$1" "$B/uploads" | jq -r .id; }
 wait_done() { for _ in $(seq 1 120); do lpstat -W completed -o "$1" | grep -q "^$2 " && return 0; sleep 0.5; done; return 1; }
+
+echo "--- settings locked by the password the install set; log in with it"
+pw=$(sed -n "s/^Admin password for the Settings page: //p" /tmp/install.log)
+expect "get /session | jq -e '\''.password_set and (.admin | not)'\''"
+expect "test \"\$(code -X PUT -H X-Reprinter:1 -H Content-Type:application/json -d {} $B/admin/printers/LBP1210)\" = 401"
+send POST /login "{\"password\":\"$pw\"}" >/dev/null
+expect "get /session | jq -e .admin"
+
+echo "--- only answers to its own names (DNS rebinding)"
+name=$(cat /proc/sys/kernel/hostname)
+expect "test \"\$(code -H \"Host: evil.example\" $B/session)\" = 403"
+expect "test \"\$(code -H \"Host: evil.example:8631\" http://127.0.0.1:8631/)\" = 403"
+expect "curl -s -H \"Host: evil.example\" http://127.0.0.1:8631/ | grep -q allowed_hosts"
+expect "test \"\$(code -H \"Host: $name.local:8631\" $B/session)\" = 200"
+expect "test \"\$(code -H \"Host: localhost:8631\" $B/session)\" = 200"
 
 echo "--- page and printers"
 expect "curl -fs http://127.0.0.1:8631/ | grep -q \"<title>reprinter\""
@@ -180,7 +197,7 @@ send DELETE /admin/printers/Second >/dev/null
 expect "! lpstat -v Second"
 
 echo "--- CUPS network sharing"
-expect "get /admin/settings | jq -e '\''.cups.share_printers and .cups.remote_any'\''"
+expect "get /admin/settings | jq -e '\''.cups.share_printers and (.cups.remote_any | not) and (.cups.remote_admin | not)'\''"
 if out=$(send PUT /admin/cups "{\"share_printers\":false,\"remote_any\":false,\"remote_admin\":false}" 2>&1); then
   expect "cupsctl | grep -q _share_printers=0"
   expect "get /printers | jq -e '\''length == 2'\''"
@@ -227,13 +244,27 @@ expect "test \"\$(code $B/uploads/$pdf)\" = 404"
 expect "test ! -e /var/lib/reprinter/uploads/$pdf"
 expect "! grep -q \"^error:\" /tmp/web.log"
 
-echo "--- rerun with --web-only, then uninstall"
+echo "--- uploads cannot fill the disk (at most 10 times the 1 MB upload limit)"
+head -c 900000 /dev/zero | tr "\0" b >/tmp/part.txt
+expect "n=0; for _ in \$(seq 1 11); do upload /tmp/part.txt && n=\$((n + 1)); done; test \$n = 11"
+expect "test \"\$(code -H X-Reprinter:1 -F file=@/tmp/part.txt $B/uploads)\" = 507"
+
+echo "--- forgot the password: clear it, rerun with --web-only for a new one; then uninstall"
+# Stopped first: the running server would write its password back with the
+# next settings change.
+pkill -x reprinter-web || true
+sleep 0.5
+expect "runuser -u reprinter -- /usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml --clear-password"
 /usr/local/bin/reprinter-web install --web-only --port 8632 >/tmp/reinstall.log 2>&1 || { cat /tmp/reinstall.log; exit 1; }
 expect "grep -qF \"listen = \\\"0.0.0.0:8632\\\"\" /var/lib/reprinter/config.toml"
 expect "grep -q \"max_upload_mb = 1\$\" /var/lib/reprinter/config.toml"
 expect "grep -q \"stuck_job_minutes = 0\$\" /var/lib/reprinter/config.toml"
-pkill -x reprinter-web || true
-sleep 0.5
+expect "grep -q \"^Admin password for the Settings page: \" /tmp/reinstall.log"
+hash=$(grep admin_password_hash /var/lib/reprinter/config.toml)
+expect "grep -q \"\\\$argon2\" <<<\"\$hash\""
+/usr/local/bin/reprinter-web install --web-only >/tmp/reinstall.log 2>&1 || { cat /tmp/reinstall.log; exit 1; }
+expect "grep -q \"keeps its admin password\" /tmp/reinstall.log"
+expect "test \"\$(grep admin_password_hash /var/lib/reprinter/config.toml)\" = \"\$hash\""
 /opt/reprinter-web uninstall --purge >/tmp/uninstall.log 2>&1 || { cat /tmp/uninstall.log; exit 1; }
 expect "test ! -e /usr/local/bin/reprinter-web"
 expect "test ! -e /etc/systemd/system/reprinter-web.service"

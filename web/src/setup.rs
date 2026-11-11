@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{config::Config, embedded};
+use crate::{auth, config::Config, embedded};
 
 const BIN: &str = "/usr/local/bin/reprinter-web";
 const UNIT_PATH: &str = "/etc/systemd/system/reprinter-web.service";
@@ -235,10 +235,10 @@ pub fn install(argv: &[String]) -> Result<(), String> {
 
     step("Web interface");
     install_binary()?;
-    let listen = install_settings(&o)?;
+    let (listen, password) = install_settings(&o)?;
     install_service(&listen)?;
     open_firewall(&listen);
-    report(&listen);
+    report(&listen, password.as_deref());
     Ok(())
 }
 
@@ -261,8 +261,9 @@ fn install_binary() -> Result<(), String> {
     Ok(())
 }
 
-/// Service user, state directory and settings file. Returns the listen address.
-fn install_settings(o: &Options) -> Result<String, String> {
+/// Service user, state directory and settings file. Returns the listen
+/// address, and the admin password when one was generated.
+fn install_settings(o: &Options) -> Result<(String, Option<String>), String> {
     if !succeeds("id", &[USER]) {
         info(&format!("Creating the {USER} system user"));
         run(
@@ -289,11 +290,26 @@ fn install_settings(o: &Options) -> Result<String, String> {
     let path = Path::new(CONFIG);
     let existed = path.exists();
     let mut config = Config::load(path)?;
+    let mut changed = false;
     if !existed || o.port.is_some() || o.local {
         let port = o
             .port
             .unwrap_or_else(|| port_of(&config.listen).unwrap_or(DEFAULT_PORT));
         config.listen = format!("{}:{port}", if o.local { "127.0.0.1" } else { "0.0.0.0" });
+        changed = true;
+    }
+    // Without a password, anyone who can open the page could change the
+    // settings, e.g. point a printer at their own server and get every
+    // document printed on it. So the settings start out locked.
+    let password = if config.admin_password_hash.is_empty() {
+        let password = auth::generate_password();
+        config.admin_password_hash = auth::hash_password(&password)?;
+        changed = true;
+        Some(password)
+    } else {
+        None
+    };
+    if changed {
         config.save(path).map_err(|e| format!("{CONFIG}: {e}"))?;
         info(&format!("Settings: {CONFIG} (listen {})", config.listen));
     } else {
@@ -302,8 +318,11 @@ fn install_settings(o: &Options) -> Result<String, String> {
             config.listen
         ));
     }
+    if password.is_some() {
+        info("Set a new admin password for the Settings page (shown at the end)");
+    }
     run("chown", &["-R", &format!("{USER}:{USER}"), STATE_DIR])?;
-    Ok(config.listen)
+    Ok((config.listen, password))
 }
 
 fn port_of(listen: &str) -> Option<u16> {
@@ -370,7 +389,7 @@ fn open_firewall(listen: &str) {
     }
 }
 
-fn report(listen: &str) {
+fn report(listen: &str, password: Option<&str>) {
     let port = port_of(listen).unwrap_or(DEFAULT_PORT);
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|h| h.trim().to_string())
@@ -387,14 +406,20 @@ fn report(listen: &str) {
             ip.as_deref().unwrap_or("<this-host-ip>")
         );
     }
+    match password {
+        Some(password) => println!(
+            "\nAdmin password for the Settings page: {password}\n\
+             It is not shown again; change it under Settings -> Web interface."
+        ),
+        None => println!("\nThe Settings page keeps its admin password."),
+    }
     println!(
-        "\nAnyone who can open the page can print and, until you set an admin password\n\
-         (Settings -> Web interface), change the settings.\n\n\
+        "Anyone who can open the page can print; changing the settings needs the password.\n\n\
          Logs:      journalctl -u reprinter-web\n\
          Settings:  {CONFIG}\n\
-         Forgot the admin password?\n  \
+         Forgot the admin password? Remove it, and the next install sets a new one:\n  \
            sudo -u {USER} {BIN} --config {CONFIG} --clear-password\n  \
-           sudo systemctl restart reprinter-web"
+           sudo {BIN} install --web-only"
     );
 }
 

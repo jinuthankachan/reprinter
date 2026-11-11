@@ -33,7 +33,8 @@ chmod +x reprinter-web
 sudo ./reprinter-web install
 ```
 
-Then open `http://<host>:8631/`.
+Then open `http://<host>:8631/`. The admin password for the Settings page is
+printed at the end of the install.
 
 `reprinter-web install`:
 
@@ -42,7 +43,8 @@ Then open `http://<host>:8631/`.
    It is unpacked into a private temporary directory and removed afterwards.
 2. Copies itself to `/usr/local/bin/reprinter-web`.
 3. Creates the `reprinter` system user and adds it to `lpadmin`.
-4. Writes `/var/lib/reprinter/config.toml` if it does not exist.
+4. Writes `/var/lib/reprinter/config.toml` if it does not exist. When no
+   admin password is set, it sets a random one and prints it at the end.
 5. Installs and starts the `reprinter-web` systemd service, and opens its
    port in `ufw` or `firewalld` if one is active.
 
@@ -126,7 +128,10 @@ depends on the printer; try with a short document first.
 Uploaded files stay on the server so they can be printed again (and for the
 second pass of two-sided printing) until "Remove", or until they have not
 been used for the configured time (60 minutes by default). They are also
-deleted when the service restarts.
+deleted when the service restarts. So that uploads cannot fill the disk, the
+server keeps at most 100 of them, taking at most 10 times the upload limit
+together (500 MB by default); beyond that, uploads are refused until older
+ones are removed or expire.
 
 ### Jobs
 
@@ -166,13 +171,28 @@ The Print page marks unwanted printers and never picks one by itself.
 
 ## Security
 
-- **Without an admin password, anyone who can open the page can change the
-  settings**, including deleting printers. Set one under Settings → Web
-  interface. Printing, the queue and retrying or canceling jobs (also all at
-  once) stay open to everyone on the network, as with the printer itself.
+- **The settings need the admin password.** `reprinter-web install` sets a
+  random one when there is none and prints it; change it under Settings →
+  Web interface. Printing, the queue and retrying or canceling jobs (also all
+  at once) stay open to everyone on the network, as with the printer itself.
+  Removing the password ("Remove password") opens the settings to everyone
+  who can open the page, including pointing a printer at another server,
+  which then receives every document printed on it.
 - The password is stored as an Argon2 hash in
   `/var/lib/reprinter/config.toml` (readable by the service only). Logins
-  last 12 hours or until the service restarts.
+  last 12 hours or until the service restarts. Passwords are checked one at a
+  time, and a wrong one holds the next check back for a second, so guessing
+  is slow and many logins at once cannot exhaust the server's memory.
+- The server only answers to its own names: IP addresses, `localhost`, its
+  host name and `<hostname>.local`. That stops DNS rebinding, where another
+  web site points its own domain name at the server to use the API from a
+  visitor's browser. To open the page by another name (e.g. one from your
+  router's DNS), add it to `/var/lib/reprinter/config.toml`, without the
+  port, and restart the service:
+
+  ```toml
+  allowed_hosts = ["printer.lan"]
+  ```
 - The page is plain HTTP, like CUPS on port 631: fine on a home LAN, not for
   the Internet. Do not forward the port on your router; use `--local` on a
   host that is reachable from outside.
@@ -185,11 +205,12 @@ The Print page marks unwanted printers and never picks one by itself.
   other web sites cannot add, so a malicious page cannot make your browser
   print or change settings.
 
-Forgot the password:
+Forgot the password: remove it, then rerun the install, which sets and
+prints a new one and restarts the service:
 
 ```sh
 sudo -u reprinter /usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml --clear-password
-sudo systemctl restart reprinter-web
+sudo reprinter-web install --web-only
 ```
 
 ## Troubleshooting
@@ -197,6 +218,9 @@ sudo systemctl restart reprinter-web
 | Symptom | Check |
 |---------|-------|
 | Page does not load | `systemctl status reprinter-web`, `journalctl -u reprinter-web`. Firewall: open the port (8631/tcp). |
+| "reprinter-web does not answer to the name ..." | The page was opened by a name the server does not know as its own. Use its IP address or `<hostname>.local`, or add the name to `allowed_hosts` (see [Security](#security)). |
+| Login says "too many login attempts" | Many logins are being sent at once, e.g. by something guessing the password. Try again in a minute. |
+| Upload refused: "the server holds too many uploaded files" | Remove files you no longer need, or wait until unused ones expire (Settings → Web interface). |
 | "cannot reach CUPS" | `systemctl status cups`. The service talks to `/run/cups/cups.sock`. |
 | Changing a printer says "Forbidden" or "Unauthorized" | The `reprinter` user must be in `lpadmin`: `id reprinter`. Rerun `sudo reprinter-web install --web-only`. |
 | Network sharing: "CUPS on this server only lets root change these settings" | Some CUPS builds (Ubuntu 24.04) refuse configuration changes from anyone but root, whatever their groups. Run the `sudo cupsctl ...` command shown on the page. |

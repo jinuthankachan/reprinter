@@ -22,13 +22,18 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 # 0. Sanity checks
 # ---------------------------------------------------------------------------
 ARCH="$(dpkg --print-architecture)"
+# SHA-256 of the release packages; the same digests as drivers/captppd.sh.
 case "$ARCH" in
-  arm64) DEB="captppd_${CAPTPPD_VERSION}_arm64.deb" ;;
+  arm64)
+    DEB="captppd_${CAPTPPD_VERSION}_arm64.deb"
+    DEB_SHA256=29dceddcf9954d20aceb8aae09e10df3fd635efdd37ab9a3f0dd32306a6ea5ba
+    ;;
   armhf)
     # The armhf .deb depends on "libcups2"; on Debian 13 (trixie) 32-bit that
     # package is called libcups2t64 and does NOT provide libcups2, so the
     # prebuilt package will not install there. Bookworm 32-bit is fine.
     DEB="captppd_${CAPTPPD_VERSION}_armhf.deb"
+    DEB_SHA256=1b020be9b52ceab0d13598e474b9752ae9ab6f2532aaec8975ca7275aa5f0c29
     if grep -q '^VERSION_CODENAME=trixie' /etc/os-release; then
       die "32-bit trixie detected. Reflash with Raspberry Pi OS Lite (64-bit), or build captppd from source (see README.md)."
     fi
@@ -57,6 +62,10 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 curl -fsSL -o "$TMP/$DEB" \
   "https://github.com/darkvision77/captppd/releases/download/v${CAPTPPD_VERSION}/${DEB}"
+echo "$DEB_SHA256  $TMP/$DEB" | sha256sum -c --quiet - ||
+  die "checksum mismatch for $DEB; refusing to install it"
+chmod 755 "$TMP"
+chmod 644 "$TMP/$DEB" # readable by apt's sandbox user
 sudo apt-get install -y "$TMP/$DEB"
 
 # The backend talks to the printer through libusb and detaches the kernel
@@ -69,9 +78,11 @@ sudo modprobe -r usblp 2>/dev/null || true
 # ---------------------------------------------------------------------------
 # 3. Let this user administer CUPS, open CUPS to the LAN, share printers
 # ---------------------------------------------------------------------------
-log "Configuring CUPS for LAN access and sharing"
+log "Configuring CUPS to share printers on the local network"
 sudo usermod -aG lpadmin "$USER"
-sudo cupsctl --remote-any --remote-admin --share-printers
+# Printing from the local network; CUPS administration from the Pi only
+# (sudo cupsctl --remote-admin allows it from the LAN).
+sudo cupsctl --share-printers
 sudo systemctl enable --now cups avahi-daemon
 sudo systemctl restart cups
 sleep 2

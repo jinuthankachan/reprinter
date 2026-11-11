@@ -83,6 +83,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(|| async { asset("image/svg+xml", FAVICON_SVG) }),
         )
         .nest("/api", api)
+        .layer(middleware::from_fn_with_state(state.clone(), check_host))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
@@ -120,6 +121,35 @@ async fn require_api_header(request: Request, next: Next) -> Response {
         return AppError::new(StatusCode::FORBIDDEN, "missing X-Reprinter header").into_response();
     }
     next.run(request).await
+}
+
+/// DNS rebinding guard (`auth::host_allowed`): refuses requests for host
+/// names this server does not have, with a note on how to open it instead.
+/// Requests without a Host header (HTTP/1.0 tools) pass: browsers always
+/// send one.
+async fn check_host(State(st): State<Arc<AppState>>, request: Request, next: Next) -> Response {
+    let refused = request.headers().get(header::HOST).and_then(|value| {
+        let host = value.to_str().unwrap_or_default();
+        let extra = &st.config.read().unwrap().allowed_hosts;
+        let allowed = auth::host_allowed(host, &st.hostname, extra);
+        (!allowed).then(|| host.to_string())
+    });
+    let Some(host) = refused else {
+        return next.run(request).await;
+    };
+    let message = format!(
+        "reprinter-web does not answer to the name \"{host}\". Open it by IP address or as \
+         http://{}.local:PORT/, or add the name to allowed_hosts in {} and restart \
+         reprinter-web.\n",
+        st.hostname,
+        st.config_path.display()
+    );
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        message,
+    )
+        .into_response()
 }
 
 async fn security_headers(request: Request, next: Next) -> Response {
@@ -167,12 +197,15 @@ async fn login(State(st): State<Arc<AppState>>, Json(body): Json<Login>) -> Resu
     if hash.is_empty() {
         return Ok(Json(json!({ "ok": true })).into_response());
     }
-    let ok = tokio::task::spawn_blocking(move || auth::verify_password(&body.password, &hash))
-        .await
-        .unwrap_or(false);
-    if !ok {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // slow down guessing
-        return Err(AppError::unauthorized("wrong password"));
+    match st.login_gate.check(body.password, hash).await {
+        Some(true) => {}
+        Some(false) => return Err(AppError::unauthorized("wrong password")),
+        None => {
+            return Err(AppError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many login attempts right now; try again in a minute",
+            ));
+        }
     }
     let token = st.sessions.create();
     Ok((

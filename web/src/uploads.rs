@@ -4,6 +4,11 @@
 //! can be previewed and printed more than once (manual two-sided printing
 //! prints the same file twice). Metadata is kept in memory: files left over
 //! from a previous run are deleted at startup, and unused uploads expire.
+//!
+//! Uploading is open to everyone on the network, so the space uploads take
+//! is bounded and they cannot fill the disk: at most `MAX_FILES` files, and
+//! at most `STORAGE_FACTOR` times the upload limit in total. Files still
+//! being received count too.
 
 use std::{
     collections::HashMap,
@@ -13,6 +18,9 @@ use std::{
 };
 
 use serde::Serialize;
+
+pub const MAX_FILES: usize = 100;
+pub const STORAGE_FACTOR: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -36,7 +44,16 @@ pub struct Upload {
 
 pub struct Uploads {
     dir: PathBuf,
-    items: Mutex<HashMap<String, Upload>>,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    items: HashMap<String, Upload>,
+    /// Size of the stored files plus what has arrived of those being received.
+    bytes: u64,
+    /// Files being received.
+    receiving: usize,
 }
 
 fn is_upload_id(name: &str) -> bool {
@@ -57,7 +74,7 @@ impl Uploads {
         }
         Ok(Self {
             dir,
-            items: Mutex::default(),
+            state: Mutex::default(),
         })
     }
 
@@ -70,22 +87,43 @@ impl Uploads {
     }
 
     pub fn get(&self, id: &str) -> Option<Upload> {
-        self.items.lock().unwrap().get(id).cloned()
+        self.state.lock().unwrap().items.get(id).cloned()
     }
 
-    pub fn insert(&self, upload: Upload) {
-        self.items.lock().unwrap().insert(upload.id.clone(), upload);
+    /// Starts receiving a file under a new id, or None when `MAX_FILES`
+    /// files are already stored or being received.
+    pub fn receive(&self) -> Option<Incoming<'_>> {
+        let mut s = self.state.lock().unwrap();
+        if s.items.len() + s.receiving >= MAX_FILES {
+            return None;
+        }
+        s.receiving += 1;
+        let id = crate::auth::random_hex(16);
+        Some(Incoming {
+            store: self,
+            path: self.path(&id),
+            id,
+            bytes: 0,
+            done: false,
+        })
     }
 
     /// Restarts the expiry clock (the file was just printed).
     pub fn touch(&self, id: &str) {
-        if let Some(u) = self.items.lock().unwrap().get_mut(id) {
+        if let Some(u) = self.state.lock().unwrap().items.get_mut(id) {
             u.used = SystemTime::now();
         }
     }
 
     pub fn remove(&self, id: &str) -> bool {
-        let removed = self.items.lock().unwrap().remove(id);
+        let removed = {
+            let mut s = self.state.lock().unwrap();
+            let removed = s.items.remove(id);
+            if let Some(u) = &removed {
+                s.bytes -= u.size;
+            }
+            removed
+        };
         if let Some(u) = &removed {
             let _ = std::fs::remove_file(self.path(&u.id));
         }
@@ -95,9 +133,10 @@ impl Uploads {
     pub fn prune(&self, ttl: Duration) -> usize {
         let now = SystemTime::now();
         let expired: Vec<String> = self
-            .items
+            .state
             .lock()
             .unwrap()
+            .items
             .values()
             .filter(|u| now.duration_since(u.used).unwrap_or_default() > ttl)
             .map(|u| u.id.clone())
@@ -109,14 +148,58 @@ impl Uploads {
     }
 }
 
-/// Deletes a half-written upload unless disarmed (`.0 = None`).
-pub struct RemoveOnDrop(pub Option<PathBuf>);
+/// A file being received (`Uploads::receive`). Its bytes count against the
+/// storage limit as they arrive; the file is deleted again, and its room
+/// given back, unless `finish` is called.
+pub struct Incoming<'a> {
+    store: &'a Uploads,
+    pub id: String,
+    pub path: PathBuf,
+    bytes: u64,
+    done: bool,
+}
 
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_file(path);
+impl Incoming<'_> {
+    /// Takes room for `n` more bytes; false when all uploads together would
+    /// then take more than `limit` bytes.
+    pub fn reserve(&mut self, n: u64, limit: u64) -> bool {
+        let mut s = self.store.state.lock().unwrap();
+        if s.bytes.saturating_add(n) > limit {
+            return false;
         }
+        s.bytes += n;
+        self.bytes += n;
+        true
+    }
+
+    /// Keeps the file as an upload of the size received so far.
+    pub fn finish(mut self, name: String, kind: Kind, mime: &'static str) -> Upload {
+        let upload = Upload {
+            id: self.id.clone(),
+            name,
+            size: self.bytes,
+            kind,
+            mime,
+            used: SystemTime::now(),
+        };
+        let store = self.store;
+        let mut s = store.state.lock().unwrap();
+        s.receiving -= 1;
+        s.items.insert(upload.id.clone(), upload.clone());
+        self.done = true;
+        upload
+    }
+}
+
+impl Drop for Incoming<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.path);
+        let mut s = self.store.state.lock().unwrap();
+        s.receiving -= 1;
+        s.bytes -= self.bytes;
     }
 }
 
@@ -246,20 +329,48 @@ mod tests {
         assert!(!leftover.exists(), "files from a previous run are removed");
         assert!(dir.join("keep.txt").exists(), "other files are left alone");
 
-        let id = "fedcba9876543210fedcba9876543210".to_string();
-        std::fs::write(store.path(&id), b"x").unwrap();
-        store.insert(Upload {
-            id: id.clone(),
-            name: "x".into(),
-            size: 1,
-            kind: Kind::Text,
-            mime: "text/plain",
-            used: SystemTime::now() - Duration::from_secs(120),
-        });
+        let mut incoming = store.receive().unwrap();
+        std::fs::write(&incoming.path, b"x").unwrap();
+        assert!(incoming.reserve(1, 100));
+        let id = incoming.finish("x".into(), Kind::Text, "text/plain").id;
+        assert!(is_upload_id(&id));
+        assert_eq!(store.get(&id).unwrap().size, 1);
+        store.state.lock().unwrap().items.get_mut(&id).unwrap().used =
+            SystemTime::now() - Duration::from_secs(120);
         assert_eq!(store.prune(Duration::from_secs(3600)), 0);
         assert_eq!(store.prune(Duration::from_secs(60)), 1);
         assert!(store.get(&id).is_none());
         assert!(!store.path(&id).exists());
+        assert_eq!(store.state.lock().unwrap().bytes, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn storage_is_bounded() {
+        let dir = std::env::temp_dir().join(format!("reprinter-quota-{}", std::process::id()));
+        let store = Uploads::new(dir.clone()).unwrap();
+
+        // Bytes: in-flight uploads count, abandoned ones give their room back.
+        let mut a = store.receive().unwrap();
+        assert!(a.reserve(60, 100));
+        let mut b = store.receive().unwrap();
+        assert!(!b.reserve(50, 100), "60 + 50 is over the limit");
+        assert!(b.reserve(40, 100));
+        drop(b);
+        assert_eq!(store.state.lock().unwrap().bytes, 60);
+        let a = a.finish("a".into(), Kind::Text, "text/plain");
+        let mut c = store.receive().unwrap();
+        assert!(!c.reserve(41, 100));
+        drop(c);
+        store.remove(&a.id);
+        assert_eq!(store.state.lock().unwrap().bytes, 0);
+
+        // Files: stored and in-flight ones count.
+        let pending: Vec<_> = (0..MAX_FILES).map(|_| store.receive().unwrap()).collect();
+        assert!(store.receive().is_none());
+        drop(pending);
+        assert!(store.receive().is_some());
+        assert_eq!(store.state.lock().unwrap().receiving, 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

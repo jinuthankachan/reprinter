@@ -52,6 +52,8 @@ lint: ## Formatting, clippy and shell syntax (plus shellcheck when installed)
 	cd web && $(CARGO) fmt --check
 	cd web && $(CARGO) clippy --locked --all-targets -- -D warnings
 	for f in $(SCRIPTS); do bash -n "$$f"; done
+	for d in $$(sed -n 's/^ *DEB_SHA256=//p' pi-setup.sh); do \
+	  grep -q "$$d" drivers/captppd.sh || { echo "pi-setup.sh: digest $$d is not in drivers/captppd.sh" >&2; exit 1; }; done
 	if command -v shellcheck >/dev/null; then shellcheck -x $(SCRIPTS); \
 	else echo "shellcheck not installed: skipped"; fi
 	if command -v node >/dev/null; then node --check web/static/app.js; fi

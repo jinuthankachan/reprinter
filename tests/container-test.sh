@@ -50,6 +50,8 @@ for opt in $PRINTER_OPTIONS; do
 done
 expect "lpstat -d | grep $queue"
 expect "cupsctl | grep _share_printers=1"
+expect "cupsctl | grep _remote_any=0"
+expect "cupsctl | grep _remote_admin=0"
 echo "--- rerun updates the queue in place, and removes queues for the printer on another backend"
 # What the desktop makes when the printer is plugged in before its driver is
 # installed: a queue on the stock usb backend with a generic driver.
