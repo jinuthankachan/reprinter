@@ -92,6 +92,28 @@ echo "hello" | lp -d LBP1210
 lpstat -o
 ```
 
+## Web interface
+
+Optionally, add a web page for printing and settings:
+
+```sh
+./install-web.sh
+```
+
+Then open `http://<host>:8631/` from any browser, phone included. Upload a
+PDF, image or text file, choose the page setup (copies, pages, paper size,
+orientation, scaling, pages per sheet, the printer's own options, and
+two-sided printing by hand for printers without a duplexer) and print it.
+The Jobs page shows and cancels jobs; the Settings page changes printer
+defaults and sharing, adds printers from the profiles in `printers/`, and
+sets an admin password. Set that password: until then anyone on the network
+can change the settings.
+
+It needs Rust 1.85+ to build (`sudo apt install cargo` on Debian 13, or
+[rustup](https://rustup.rs)), or a binary built elsewhere (`--bin`). Details,
+cross-compiling for a Pi and security notes:
+[docs/web-interface.md](docs/web-interface.md).
+
 ## Adding the printer on clients
 
 Avahi advertises the queue as an IPP Everywhere / AirPrint printer, so most
@@ -152,12 +174,17 @@ on the server).
   expose port 631 to the Internet; on such a host use `--local` or a firewall.
 - Prebuilt driver packages are checked against pinned SHA-256 digests and
   source builds against a pinned upstream commit. A mismatch stops the install.
+- The web interface (port 8631) lets anyone on the network print; set an
+  admin password so that only you can change settings. It runs as an
+  unprivileged `reprinter` user in the `lpadmin` group. See
+  [docs/web-interface.md](docs/web-interface.md#security).
 
 ## Uninstall
 
 For the default LBP-1210 setup:
 
 ```sh
+./install-web.sh --uninstall   # if the web interface is installed
 sudo lpadmin -x LBP1210
 sudo apt remove captppd
 sudo rm /etc/modprobe.d/blacklist-usblp.conf
@@ -168,12 +195,15 @@ sudo cupsctl --no-remote-any --no-remote-admin --no-share-printers
 
 ```
 install.sh               entry point
+install-web.sh           installs the web interface as a systemd service
 lib/common.sh            platform detection, packages, services
 lib/cups.sh              CUPS stack, sharing, firewall, device discovery, queue
 drivers/<driver>.sh      one module per driver: install, host tweaks, diagnostics
 printers/<id>.conf       one profile per printer model
-docs/                    host guides, printer notes, contributor guide
+web/                     the web interface: Rust server (src/), page (static/), systemd unit
+docs/                    host guides, printer notes, web interface, contributor guide
 tests/container-test.sh  Docker smoke tests (no printer needed)
+tests/web-test.sh        Docker end-to-end tests of the web interface
 ```
 
 A printer profile says which driver it needs and how to recognise the printer;
@@ -187,4 +217,6 @@ containers and creates the queue on a fake device URI):
 ```sh
 tests/container-test.sh                          # Debian 12/13, Ubuntu 22.04/24.04
 FROM_SOURCE=1 tests/container-test.sh debian:13  # source-build path
+(cd web && cargo test)                           # web interface unit tests
+tests/web-test.sh                                # web interface end to end (Debian 13, Ubuntu 24.04)
 ```
