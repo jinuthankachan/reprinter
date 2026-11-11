@@ -151,6 +151,25 @@ const JOB_STATES = {
   canceled: 'Canceled', aborted: 'Failed', completed: 'Done',
 };
 
+// Why a job is not printing, from the job-state-reasons CUPS gives.
+const JOB_REASONS = {
+  'resources-are-not-ready':
+    'The printer did not answer. CUPS tries again every few minutes. Switch the printer off and on, then press Retry.',
+  'cups-held-for-authentication': 'Waiting for a password that this server cannot give.',
+  'job-hold-until-specified': 'Held until someone releases it.',
+  'printer-stopped': 'The printer is disabled: the job waits until it is enabled again (Settings).',
+};
+
+function jobNote(job) {
+  if (!['pending', 'held', 'stopped'].includes(job.state)) return null;
+  const reason = job.reasons.map((r) => JOB_REASONS[r]).find(Boolean)
+    || (job.stuck ? 'CUPS is holding the job after a printer error.' : '');
+  // What the printer's backend said, e.g. "USB backend error: read failed".
+  const detail = (job.stuck || job.state === 'stopped') && job.message ? `(${job.message})` : '';
+  const text = [reason, detail].filter(Boolean).join(' ');
+  return text && h('small', { class: 'job-note' }, text);
+}
+
 function jobRow(job, { cancel = false, showPrinter = true } = {}) {
   const meta = [
     `#${job.id}`,
@@ -160,8 +179,9 @@ function jobRow(job, { cancel = false, showPrinter = true } = {}) {
     fmtTime(job.completed || job.created),
   ].filter(Boolean).join(' · ');
   return h('li', { class: 'job' },
-    h('div', { class: 'job-main' }, h('strong', {}, job.name || `Job ${job.id}`), h('small', {}, meta)),
+    h('div', { class: 'job-main' }, h('strong', {}, job.name || `Job ${job.id}`), h('small', {}, meta), jobNote(job)),
     h('span', { class: `pill ${job.state}` }, JOB_STATES[job.state] || job.state),
+    cancel && job.stuck && h('button', { type: 'button', class: 'ghost small', onclick: (e) => retryJob(e.currentTarget, job) }, 'Retry'),
     cancel && h('button', { type: 'button', class: 'ghost small', onclick: (e) => cancelJob(e.currentTarget, job) }, 'Cancel'));
 }
 
@@ -176,6 +196,26 @@ async function cancelJob(button, job) {
   await busy(button, async () => {
     await api('DELETE', `/jobs/${job.id}`);
     toast(`Job ${job.id} canceled`);
+    refreshCurrent();
+  });
+}
+
+async function retryJob(button, job) {
+  await busy(button, async () => {
+    await api('POST', `/jobs/${job.id}/retry`);
+    toast(`Trying job ${job.id} again`);
+    refreshCurrent();
+  });
+}
+
+/** Cancels all active jobs, or only the stuck ones, on one printer or all. */
+async function cancelJobs(button, { printer = '', stuck = false, count }) {
+  const what = `${stuck ? 'the stuck' : 'all'} ${count === 1 ? 'job' : `${count} jobs`}${printer ? ` on ${printer}` : ''}`;
+  if (!confirm(`Cancel ${what}?`)) return;
+  await busy(button, async () => {
+    const r = await api('DELETE', `/jobs?${new URLSearchParams({ printer, stuck })}`);
+    const n = r.canceled.length;
+    toast(n ? `Canceled ${n} job${n === 1 ? '' : 's'}` : 'There was nothing to cancel');
     refreshCurrent();
   });
 }
@@ -225,14 +265,18 @@ async function loadPrinters(quiet = false) {
   $('#no-printers').hidden = list.length > 0;
 
   const select = $('#printer');
-  const names = list.map((p) => p.name).join('\n');
+  const names = list.map((p) => `${p.name}${p.unwanted ? '!' : ''}`).join('\n');
   if (select.dataset.names !== names) {
-    select.replaceChildren(...list.map((p) =>
-      h('option', { value: p.name }, p.info && p.info !== p.name ? `${p.name} — ${p.info}` : p.name)));
+    select.replaceChildren(...list.map((p) => {
+      const label = p.info && p.info !== p.name ? `${p.name} — ${p.info}` : p.name;
+      return h('option', { value: p.name }, p.unwanted ? `${label} (unwanted)` : label);
+    }));
     select.dataset.names = names;
   }
+  // Unwanted queues (see Settings → Clean up) are never picked by themselves.
   const wanted = state.printer || prefs.get('printer', '');
-  const pick = list.find((p) => p.name === wanted) || list.find((p) => p.is_default) || list[0];
+  const pick = list.find((p) => p.name === wanted)
+    || list.find((p) => p.is_default && !p.unwanted) || list.find((p) => !p.unwanted) || list[0];
   if (pick) {
     select.value = pick.name;
     if (pick.name !== state.printer) await selectPrinter(pick.name);
@@ -261,7 +305,11 @@ async function selectPrinter(name) {
 function showPrinterStatus() {
   const p = state.printers.find((x) => x.name === state.printer);
   $('#printer-state').replaceChildren(p ? statePill(p) : '');
-  $('#printer-message').textContent = p ? (p.state_message || [p.make_model, p.location].filter(Boolean).join(' · ')) : '';
+  const message = $('#printer-message');
+  message.classList.toggle('warn-text', !!p?.unwanted);
+  message.textContent = !p ? ''
+    : p.unwanted ? `Do not print to this printer. ${p.unwanted} Remove it under Settings → Clean up.`
+      : p.state_message || [p.make_model, p.location].filter(Boolean).join(' · ');
 }
 
 function renderPpd() {
@@ -507,6 +555,9 @@ async function renderJobs() {
   }
   $('#jobs-active').replaceChildren(jobList(data.active, { cancel: true }, 'No active jobs.'));
   $('#jobs-finished').replaceChildren(jobList(data.finished, {}, 'No finished jobs yet.'));
+  const cancelAll = $('#jobs-cancel-all');
+  cancelAll.hidden = data.active.length < 2;
+  cancelAll.onclick = () => cancelJobs(cancelAll, { printer, count: data.active.length });
 }
 
 // ---------------------------------------------------------------------------
@@ -523,13 +574,15 @@ async function renderSettings() {
       root.replaceChildren(loginForm());
       return;
     }
-    const [settings, printers] = await Promise.all([api('GET', '/admin/settings'), api('GET', '/printers')]);
+    const [settings, printers, jobs] = await Promise.all([
+      api('GET', '/admin/settings'), api('GET', '/printers'), api('GET', '/jobs?history=false')]);
     const warning = !settings.web.password_set && h('div', { class: 'notice warn' },
       'Anyone who can open this page can change these settings. ',
       h('button', { type: 'button', class: 'link', onclick: () => $('#web-settings').scrollIntoView({ behavior: 'smooth' }) },
         'Set an admin password'), '.');
     root.replaceChildren(...[
       warning,
+      cleanupCard(printers, jobs.active, settings.web.stuck_job_minutes),
       printersCard(printers, open),
       addPrinterCard(printers),
       cupsCard(settings.cups),
@@ -564,6 +617,49 @@ function loginForm() {
   return form;
 }
 
+// Clean up ------------------------------------------------------------------
+
+/** Unwanted printers and stuck jobs, when there are any. */
+function cleanupCard(printers, active, stuckMinutes) {
+  const unwanted = printers.filter((p) => p.unwanted);
+  const stuck = active.filter((j) => j.stuck);
+  if (!unwanted.length && !stuck.length) return null;
+
+  const remove = async (list) => {
+    const what = list.length === 1 ? `the printer ${list[0].name}` : `these ${list.length} printers`;
+    if (!confirm(`Remove ${what}? Jobs waiting in them are canceled.`)) return;
+    for (const p of list) await api('DELETE', `/admin/printers/${enc(p.name)}`);
+    toast(list.length === 1 ? `Removed ${list[0].name}` : `Removed ${list.length} printers`);
+    renderSettings();
+  };
+  const waiting = (p) => p.queued_jobs > 0 && h('small', {}, `${p.queued_jobs} job${p.queued_jobs === 1 ? '' : 's'} waiting in it`);
+
+  return h('section', { class: 'card', id: 'cleanup' },
+    h('h2', {}, 'Clean up'),
+    unwanted.length > 0 && [
+      h('p', { class: 'hint' }, 'These printers only get in the way: remove them so nobody prints to them by mistake.'),
+      h('ul', { class: 'cleanup' }, unwanted.map((p) => h('li', {},
+        h('div', {}, h('strong', {}, p.name), h('small', {}, p.unwanted), waiting(p)),
+        actionButton('Remove', 'danger small', () => remove([p]))))),
+      unwanted.length > 1 && h('div', { class: 'actions' },
+        actionButton(`Remove all ${unwanted.length}`, 'danger', () => remove(unwanted))),
+    ],
+    stuck.length > 0 && [
+      h('h3', {}, 'Stuck jobs'),
+      h('p', { class: 'hint' },
+        'CUPS is holding these jobs because printing them failed. Fix the printer and press Retry, or cancel them. ',
+        stuckMinutes > 0
+          ? `They are canceled by themselves ${stuckMinutes} minutes after they were sent (Web interface, below).`
+          : 'They are not canceled by themselves (Web interface, below).'),
+      h('ul', { class: 'jobs' }, stuck.map((j) => jobRow(j, { cancel: true }))),
+      stuck.length > 1 && h('div', { class: 'actions' }, (() => {
+        const button = h('button', { type: 'button', class: 'danger' }, `Cancel all ${stuck.length} stuck jobs`);
+        button.addEventListener('click', () => cancelJobs(button, { stuck: true, count: stuck.length }));
+        return button;
+      })()),
+    ]);
+}
+
 // Printers ------------------------------------------------------------------
 
 function printersCard(printers, open) {
@@ -580,6 +676,7 @@ function printerDetails(p, open) {
     h('summary', {},
       h('span', { class: 'printer-sum' }, h('strong', {}, p.name), h('small', {}, p.info || p.make_model)),
       h('span', { class: 'badges' },
+        p.unwanted && h('span', { class: 'pill warn' }, 'Unwanted'),
         p.is_default && h('span', { class: 'pill' }, 'Default'),
         p.shared && h('span', { class: 'pill' }, 'Shared'),
         statePill(p))),
@@ -820,22 +917,27 @@ function cupsCard(c) {
 function webCard(w) {
   const maxMb = h('input', { type: 'number', min: 1, max: 1024, value: w.max_upload_mb, inputmode: 'numeric' });
   const ttl = h('input', { type: 'number', min: 5, max: 10080, value: w.upload_ttl_minutes, inputmode: 'numeric' });
+  const stuck = h('input', { type: 'number', min: 0, max: 10080, value: w.stuck_job_minutes, inputmode: 'numeric' });
   const listen = h('input', { type: 'text', value: w.listen, spellcheck: 'false' });
   const save = h('button', { type: 'submit', class: 'primary' }, 'Save');
   const settingsForm = h('form', {},
     h('div', { class: 'fields' },
       field('Upload limit (MB)', maxMb),
       field('Keep uploads for (minutes)', ttl, 'Unprinted files are deleted after this.'),
+      field('Cancel stuck jobs after (minutes)', stuck, 'Jobs CUPS holds because printing failed. 0: never.'),
       field('Listen address', listen, `Takes effect after a restart (now ${w.running_listen}).`)),
     h('div', { class: 'actions' }, save));
   settingsForm.addEventListener('submit', (e) => {
     e.preventDefault();
     busy(save, async () => {
       const r = await api('PUT', '/admin/web', {
-        listen: listen.value.trim(), max_upload_mb: Number(maxMb.value), upload_ttl_minutes: Number(ttl.value),
+        listen: listen.value.trim(),
+        max_upload_mb: Number(maxMb.value),
+        upload_ttl_minutes: Number(ttl.value),
+        stuck_job_minutes: Number(stuck.value),
       });
       toast(r.restart_required ? 'Saved. Restart reprinter-web to use the new listen address.' : 'Saved');
-      loadSession();
+      renderSettings();
     });
   });
 
@@ -906,6 +1008,7 @@ function route() {
 function refreshCurrent() {
   if (currentView === 'print') refreshQueue();
   else if (currentView === 'jobs') renderJobs();
+  else if (currentView === 'settings') renderSettings();
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

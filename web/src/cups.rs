@@ -192,6 +192,9 @@ pub struct Printer {
     pub is_default: bool,
     pub device_uri: String,
     pub queued_jobs: i32,
+    /// Why this queue only gets in the way and should be removed; see
+    /// `flag_unwanted`. Not set by `printers`.
+    pub unwanted: Option<String>,
 }
 
 const PRINTER_ATTRS: &[&str] = &[
@@ -256,6 +259,7 @@ pub async fn printers(ipp: &ipp::Client) -> Result<Vec<Printer>> {
                 shared: g.bool("printer-is-shared").unwrap_or(false),
                 device_uri: g.string("device-uri"),
                 queued_jobs: g.int("queued-job-count").unwrap_or(0),
+                unwanted: None,
                 name,
             })
         })
@@ -299,6 +303,19 @@ pub struct Job {
     pub created: i64,
     pub completed: Option<i64>,
     pub pages: i32,
+    /// What the printer's backend last said about the job, e.g.
+    /// "USB backend error: read failed (Operation timed out)".
+    pub message: String,
+    /// Held by CUPS rather than by someone: see `held_by_cups`.
+    pub stuck: bool,
+}
+
+/// A held job that nobody asked to hold (no job-hold-until): CUPS holds a job
+/// like this when printing it failed, e.g. because the printer did not
+/// answer, and retries it every few minutes (printer-error-policy retry-job),
+/// or when it waits for a password that will never come.
+pub fn held_by_cups(state: &str, reasons: &[String]) -> bool {
+    state == "held" && !reasons.iter().any(|r| r == "job-hold-until-specified")
 }
 
 const JOB_ATTRS: &[&str] = &[
@@ -306,6 +323,7 @@ const JOB_ATTRS: &[&str] = &[
     "job-name",
     "job-originating-user-name",
     "job-printer-uri",
+    "job-printer-state-message",
     "job-state",
     "job-state-reasons",
     "job-k-octets",
@@ -340,6 +358,20 @@ pub async fn jobs(ipp: &ipp::Client, finished: bool) -> Result<Vec<Job>> {
         .groups(ipp::GROUP_JOB)
         .filter_map(|g| {
             let printer_uri = g.string("job-printer-uri");
+            let state = match g.int("job-state") {
+                Some(3) => "pending",
+                Some(4) => "held",
+                Some(5) => "printing",
+                Some(6) => "stopped",
+                Some(7) => "canceled",
+                Some(8) => "aborted",
+                _ => "completed",
+            };
+            let reasons: Vec<String> = g
+                .strings("job-state-reasons")
+                .into_iter()
+                .filter(|r| r != "none")
+                .collect();
             Some(Job {
                 id: g.int("job-id")?,
                 name: g.string("job-name"),
@@ -349,27 +381,173 @@ pub async fn jobs(ipp: &ipp::Client, finished: bool) -> Result<Vec<Job>> {
                     .next()
                     .unwrap_or_default()
                     .to_string(),
-                state: match g.int("job-state") {
-                    Some(3) => "pending",
-                    Some(4) => "held",
-                    Some(5) => "printing",
-                    Some(6) => "stopped",
-                    Some(7) => "canceled",
-                    Some(8) => "aborted",
-                    _ => "completed",
-                },
-                reasons: g
-                    .strings("job-state-reasons")
-                    .into_iter()
-                    .filter(|r| r != "none")
-                    .collect(),
+                state,
+                stuck: held_by_cups(state, &reasons),
+                reasons,
                 size_kb: g.int("job-k-octets").unwrap_or(0),
                 created: g.int("time-at-creation").unwrap_or(0) as i64,
                 completed: g.int("time-at-completed").filter(|t| *t > 0).map(i64::from),
                 pages: g.int("job-impressions-completed").unwrap_or(0),
+                message: g.string("job-printer-state-message"),
             })
         })
         .collect())
+}
+
+/// Cancels active jobs: those on `printer` (all printers when None), and
+/// with `stuck_only` just the ones CUPS holds after a failure that were
+/// submitted at least `min_age` ago. Returns the ids of the canceled jobs.
+pub async fn cancel_jobs(
+    ipp: &ipp::Client,
+    printer: Option<&str>,
+    stuck_only: bool,
+    min_age: Duration,
+) -> Result<Vec<i32>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut canceled = Vec::new();
+    for job in jobs(ipp, false).await? {
+        if printer.is_some_and(|p| p != job.printer)
+            || (stuck_only && !job.stuck)
+            || now - job.created < min_age.as_secs() as i64
+        {
+            continue;
+        }
+        match cancel(job.id as u32).await {
+            Ok(()) => canceled.push(job.id),
+            // It finished or was canceled in the meantime.
+            Err(e) if e.message.contains("already") => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(canceled)
+}
+
+// ---------------------------------------------------------------------------
+// Unwanted queues
+// ---------------------------------------------------------------------------
+
+/// Backends that reach printers over the network. One network printer often
+/// has several queues on purpose, and their URIs say little about the device.
+const NETWORK_SCHEMES: &[&str] = &[
+    "ipp", "ipps", "http", "https", "socket", "lpd", "dnssd", "smb", "beh",
+];
+
+/// Scheme, make/model path and serial number of a local (USB-style) device
+/// URI, lowercased: "captusb://Canon/LBP1210?drv=capt&serial=1" gives
+/// ("captusb", "canon/lbp1210", Some("1")).
+fn device_key(uri: &str) -> Option<(&str, String, Option<String>)> {
+    let (scheme, rest) = uri.split_once("://")?;
+    if NETWORK_SCHEMES.contains(&scheme) {
+        return None;
+    }
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let path = path.trim_end_matches('/').to_ascii_lowercase();
+    if path.is_empty() {
+        return None;
+    }
+    let serial = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("serial="))
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase);
+    Some((scheme, path, serial))
+}
+
+/// Whether two device URIs reach the same local printer through different
+/// backends, e.g. usb://Canon/LBP1210?serial=1 and
+/// captusb://Canon/LBP1210?drv=capt&serial=1. install.sh has the same test
+/// (`same_device_other_backend` in lib/cups.sh).
+pub fn same_device_other_backend(a: &str, b: &str) -> bool {
+    match (device_key(a), device_key(b)) {
+        (Some((scheme_a, path_a, serial_a)), Some((scheme_b, path_b, serial_b))) => {
+            scheme_a != scheme_b
+                && path_a == path_b
+                && (serial_a.is_none() || serial_b.is_none() || serial_a == serial_b)
+        }
+        _ => false,
+    }
+}
+
+/// The queue a device URI forwards to when it points back at this server's
+/// own scheduler: ipp://localhost/printers/NAME, ipps://HOST.local:631/...
+fn loopback_target<'a>(uri: &'a str, hostname: &str) -> Option<&'a str> {
+    let (scheme, rest) = uri.split_once("://")?;
+    if !matches!(scheme, "ipp" | "ipps" | "http" | "https") {
+        return None;
+    }
+    let (authority, path) = rest.split_once('/')?;
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split_once(']').map_or(v6, |(h, _)| h),
+        None => host.split(':').next().unwrap_or(host),
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let hostname = hostname.to_ascii_lowercase();
+    let local = ["localhost", "127.0.0.1", "::1"].contains(&host.as_str())
+        || host == hostname
+        || host == format!("{hostname}.local");
+    if !local {
+        return None;
+    }
+    let name = path.strip_prefix("printers/")?.split(['/', '?']).next()?;
+    (!name.is_empty()).then_some(name)
+}
+
+/// Sets `unwanted` on queues that only get in the way:
+///
+/// - a queue that reaches a printer through a different backend than one of
+///   reprinter's own queues, typically a `usb://` queue with a generic driver
+///   that the desktop created when the printer was first plugged in. It
+///   sends the printer data it does not understand, which can jam it until it
+///   is switched off and on.
+/// - a queue that forwards to another queue on this server (cups-browsed
+///   creates these for the server's own shared printers).
+///
+/// `driver_schemes` are the backends of reprinter's drivers (DRIVER_URI_SCHEME,
+/// e.g. "captusb"): queues on them are reprinter's own and never flagged.
+pub fn flag_unwanted(printers: &mut [Printer], driver_schemes: &[String], hostname: &str) {
+    let scheme = |p: &Printer| {
+        p.device_uri
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let own: Vec<(String, String)> = printers
+        .iter()
+        .filter(|p| driver_schemes.contains(&scheme(p)))
+        .map(|p| (p.name.clone(), p.device_uri.clone()))
+        .collect();
+    let names: HashSet<String> = printers.iter().map(|p| p.name.clone()).collect();
+    for p in printers.iter_mut() {
+        if own.iter().any(|(name, _)| *name == p.name) {
+            continue;
+        }
+        if let Some((name, _)) = own
+            .iter()
+            .find(|(_, uri)| same_device_other_backend(uri, &p.device_uri))
+        {
+            let driver = if p.make_model.is_empty() {
+                String::new()
+            } else {
+                format!(" with the driver \"{}\"", p.make_model)
+            };
+            p.unwanted = Some(format!(
+                "It drives the same printer as {name}, but through the {} backend{driver}. \
+                 Jobs sent to it can jam the printer.",
+                scheme(p)
+            ));
+        } else if let Some(target) =
+            loopback_target(&p.device_uri, hostname).filter(|t| *t != p.name && names.contains(*t))
+        {
+            p.unwanted = Some(format!(
+                "A duplicate of {target}: it only passes its jobs on to {target} on this server."
+            ));
+        }
+    }
 }
 
 /// Waits until the scheduler answers again (cupsctl restarts it).
@@ -490,6 +668,18 @@ pub async fn cancel(job_id: u32) -> Result<()> {
     run("cancel", &[job_id.to_string()], QUICK)
         .await
         .map(|_| ())
+}
+
+/// Releases a held job so CUPS tries it again now, instead of at its next
+/// retry (or never, for a job held until released).
+pub async fn release(job_id: u32) -> Result<()> {
+    run(
+        "lp",
+        &args(["-i", &job_id.to_string(), "-H", "resume"]),
+        QUICK,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// `cupsctl` with no arguments: `_share_printers=1` style lines.
@@ -641,6 +831,141 @@ mod tests {
         assert!(!valid_device_uri("-v"));
         assert!(!valid_device_uri("nocolon"));
         assert_eq!(clean_text(" a\nb\u{7}c ", 10), "abc");
+    }
+
+    #[test]
+    fn same_printer_through_another_backend() {
+        let capt = "captusb://Canon/LASER%20SHOT%20LBP-1210?drv=capt&serial=00000000";
+        assert!(same_device_other_backend(
+            capt,
+            "usb://Canon/LASER%20SHOT%20LBP-1210?serial=00000000"
+        ));
+        // Case and a missing serial do not matter; another serial does.
+        assert!(same_device_other_backend(
+            capt,
+            "usb://canon/laser%20shot%20lbp-1210"
+        ));
+        assert!(!same_device_other_backend(
+            capt,
+            "usb://Canon/LASER%20SHOT%20LBP-1210?serial=1234"
+        ));
+        // Same backend (a second queue on purpose), another model, network URIs.
+        assert!(!same_device_other_backend(capt, capt));
+        assert!(!same_device_other_backend(
+            capt,
+            "usb://Canon/LBP3200?serial=00000000"
+        ));
+        assert!(!same_device_other_backend(
+            "ipp://10.0.0.5/ipp/print",
+            "ipps://10.0.0.5/ipp/print"
+        ));
+        assert!(!same_device_other_backend(capt, "capture:/out"));
+    }
+
+    #[test]
+    fn queues_that_point_back_at_this_server() {
+        let t = |uri| loopback_target(uri, "printpi");
+        assert_eq!(t("ipps://localhost:631/printers/LBP1210"), Some("LBP1210"));
+        assert_eq!(
+            t("ipp://127.0.0.1/printers/LBP1210?waitjob=false"),
+            Some("LBP1210")
+        );
+        assert_eq!(t("ipp://[::1]:631/printers/A/"), Some("A"));
+        assert_eq!(t("ipp://PrintPi.local./printers/A"), Some("A"));
+        assert_eq!(t("ipp://printpi:631/printers/A"), Some("A"));
+        assert_eq!(t("ipp://otherhost.local/printers/A"), None);
+        assert_eq!(t("ipp://localhost/classes/A"), None);
+        assert_eq!(t("socket://localhost:9100"), None);
+    }
+
+    fn queue(name: &str, uri: &str, make_model: &str) -> Printer {
+        Printer {
+            name: name.into(),
+            info: String::new(),
+            location: String::new(),
+            make_model: make_model.into(),
+            state: "idle",
+            state_message: String::new(),
+            state_reasons: Vec::new(),
+            accepting: true,
+            shared: true,
+            is_default: false,
+            device_uri: uri.into(),
+            queued_jobs: 0,
+            unwanted: None,
+        }
+    }
+
+    #[test]
+    fn unwanted_queues_are_flagged() {
+        let mut list = vec![
+            queue(
+                "LBP1210",
+                "captusb://Canon/LASER%20SHOT%20LBP-1210?drv=capt&serial=0",
+                "Canon LBP1210, captppd 1.0.0",
+            ),
+            queue(
+                "LASER-SHOT-LBP-1210",
+                "usb://Canon/LASER%20SHOT%20LBP-1210?serial=0",
+                "HP LaserJet Series PCL 4/5",
+            ),
+            queue("Copy", "ipps://localhost:631/printers/LBP1210", ""),
+            queue("Self", "ipp://localhost/printers/Self", ""),
+            queue(
+                "Office",
+                "usb://HP/LaserJet%201020?serial=9",
+                "HP LaserJet 1020",
+            ),
+            queue("Network", "ipp://10.0.0.5/ipp/print", ""),
+        ];
+        flag_unwanted(&mut list, &["captusb".to_string()], "printpi");
+        let flags: Vec<(&str, bool)> = list
+            .iter()
+            .map(|p| (p.name.as_str(), p.unwanted.is_some()))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                ("LBP1210", false),
+                ("LASER-SHOT-LBP-1210", true),
+                ("Copy", true),
+                ("Self", false),
+                ("Office", false),
+                ("Network", false),
+            ]
+        );
+        let reason = list[1].unwanted.as_deref().unwrap();
+        assert!(
+            reason.contains("LBP1210") && reason.contains("usb backend"),
+            "{reason}"
+        );
+        assert!(reason.contains("HP LaserJet Series PCL 4/5"), "{reason}");
+
+        // Without a driver backend there is nothing to compare with.
+        let mut list = vec![
+            queue("A", "usb://Canon/X?serial=1", ""),
+            queue("B", "hp://Canon/X?serial=1", ""),
+        ];
+        flag_unwanted(&mut list, &[], "printpi");
+        assert!(list.iter().all(|p| p.unwanted.is_none()));
+    }
+
+    #[test]
+    fn jobs_held_by_cups() {
+        let reasons = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(held_by_cups("held", &reasons(&["resources-are-not-ready"])));
+        assert!(held_by_cups(
+            "held",
+            &reasons(&["cups-held-for-authentication"])
+        ));
+        assert!(held_by_cups("held", &[]));
+        // Held on purpose (lp -H hold, hold until a time), or not held at all.
+        assert!(!held_by_cups(
+            "held",
+            &reasons(&["job-hold-until-specified"])
+        ));
+        assert!(!held_by_cups("pending", &reasons(&["printer-stopped"])));
+        assert!(!held_by_cups("printing", &[]));
     }
 
     #[test]

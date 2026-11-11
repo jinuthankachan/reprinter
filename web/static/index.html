@@ -130,7 +130,10 @@
     <div class="card">
       <div class="card-head">
         <h2>Active jobs</h2>
-        <select id="jobs-printer" aria-label="Printer"><option value="">All printers</option></select>
+        <div class="head-actions">
+          <select id="jobs-printer" aria-label="Printer"><option value="">All printers</option></select>
+          <button type="button" class="danger small" id="jobs-cancel-all" hidden>Cancel all</button>
+        </div>
       </div>
       <div id="jobs-active"></div>
     </div>

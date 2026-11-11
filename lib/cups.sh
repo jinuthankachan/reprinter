@@ -91,7 +91,11 @@ cups_create_queue() {
   lpstat -p "$QUEUE" >/dev/null 2>&1 && verb=Updating
   [ "$SHARE" -eq 1 ] || shared=false
 
-  local -a extra opts=(-o "printer-is-shared=$shared" -o "media=$PAPER")
+  # printer-error-policy: when printing fails (printer off, jammed, not
+  # answering), hold the job and retry it every few minutes instead of
+  # stopping the whole queue until someone runs cupsenable.
+  local -a extra opts=(-o "printer-is-shared=$shared" -o "media=$PAPER"
+    -o printer-error-policy=retry-job)
   read -r -a extra <<<"$PRINTER_OPTIONS"
   for opt in "${extra[@]}"; do
     opts+=(-o "$opt")
@@ -109,6 +113,55 @@ cups_create_queue() {
   if ! env -u LPDEST -u PRINTER lpstat -d 2>/dev/null | grep -q 'system default destination:'; then
     as_root lpadmin -d "$QUEUE"
   fi
+}
+
+# Make/model path and serial number of a local (USB-style) device URI,
+# lowercased, as "path serial": "captusb://Canon/LBP1210?drv=capt&serial=1"
+# gives "canon/lbp1210 1". Fails for network URIs and URIs without a path.
+uri_device_key() {
+  local uri="$1" scheme rest path query="" serial="" kv
+  scheme="${uri%%://*}"
+  [ "$scheme" != "$uri" ] || return 1
+  case "$scheme" in ipp | ipps | http | https | socket | lpd | dnssd | smb | beh) return 1 ;; esac
+  rest="${uri#*://}"
+  path="${rest%%\?*}"
+  [ "$path" = "$rest" ] || query="${rest#*\?}"
+  path="${path%/}"
+  [ -n "$path" ] || return 1
+  local IFS='&'
+  for kv in $query; do
+    case "$kv" in serial=*) serial="${kv#serial=}" ;; esac
+  done
+  printf '%s %s\n' "${path,,}" "${serial,,}"
+}
+
+# Do two device URIs reach the same local printer through different
+# backends? e.g. usb://Canon/LBP1210?serial=1 and
+# captusb://Canon/LBP1210?drv=capt&serial=1. A missing serial matches any.
+# reprinter-web has the same test (same_device_other_backend in cups.rs).
+same_device_other_backend() {
+  local a b
+  [ "${1%%:*}" != "${2%%:*}" ] || return 1
+  a="$(uri_device_key "$1")" || return 1
+  b="$(uri_device_key "$2")" || return 1
+  [ "${a% *}" = "${b% *}" ] || return 1
+  [ -z "${a#* }" ] || [ -z "${b#* }" ] || [ "${a#* }" = "${b#* }" ]
+}
+
+# Removes queues that reach our printer through another backend, typically a
+# usb:// queue with a generic driver that the desktop created when the
+# printer was first plugged in, before its driver was installed. Such a queue
+# sends the printer data it does not understand, which can jam it until it is
+# switched off and on; and its jobs never print.
+cups_remove_conflicting_queues() {
+  local name uri
+  while read -r name uri; do
+    [ "$name" != "$QUEUE" ] || continue
+    same_device_other_backend "$URI" "$uri" || continue
+    log "Removing queue '$name': it drives this printer through ${uri%%:*}:// instead of ${URI%%:*}://"
+    info "$uri"
+    as_root lpadmin -x "$name" || warn "could not remove queue '$name'; remove it with: sudo lpadmin -x $name"
+  done < <(LC_ALL=C lpstat -v 2>/dev/null | sed -n 's/^device for \([^:]*\): \(.*\)$/\1 \2/p')
 }
 
 cups_report() {

@@ -7,10 +7,12 @@
 //!
 //! `reprinter-web` (or `reprinter-web serve`) is the service: a single-page
 //! interface (static/, embedded) and a JSON API under /api to print files,
-//! watch and cancel jobs, and change printer, CUPS and web interface
-//! settings. It reads state from the local scheduler over IPP and makes
-//! changes with the CUPS command-line tools, so it runs as an unprivileged
-//! user in the `lpadmin` group (see reprinter-web.service).
+//! watch, retry and cancel jobs, and change printer, CUPS and web interface
+//! settings. In the background it cancels jobs that CUPS has held after a
+//! printer failure for too long, so they do not clog the queue. It reads
+//! state from the local scheduler over IPP and makes changes with the CUPS
+//! command-line tools, so it runs as an unprivileged user in the `lpadmin`
+//! group (see reprinter-web.service).
 
 mod auth;
 mod config;
@@ -61,6 +63,9 @@ pub struct AppState {
     /// The address actually listened on (config or --listen).
     pub listen: String,
     pub profiles: profiles::Source,
+    /// Backends of reprinter's drivers (e.g. "captusb"), to tell reprinter's
+    /// own queues from unwanted ones (`cups::flag_unwanted`).
+    pub driver_schemes: Vec<String>,
     pub hostname: String,
     pub uploads: uploads::Uploads,
     pub sessions: auth::Sessions,
@@ -231,12 +236,20 @@ async fn serve(args: Args, config: Config) -> Result<(), String> {
         .map(|h| h.trim().to_string())
         .unwrap_or_else(|_| "localhost".into());
     let listen = args.listen.clone().unwrap_or_else(|| config.listen.clone());
+    let mut driver_schemes: Vec<String> = profiles::load_all(&profiles)
+        .into_iter()
+        .map(|p| p.uri_scheme)
+        .filter(|s| !s.is_empty())
+        .collect();
+    driver_schemes.sort();
+    driver_schemes.dedup();
 
     let state = Arc::new(AppState {
         config: RwLock::new(config),
         config_path: args.config,
         listen: listen.clone(),
         profiles,
+        driver_schemes,
         hostname,
         uploads,
         sessions: auth::Sessions::default(),
@@ -253,6 +266,28 @@ async fn serve(args: Args, config: Config) -> Result<(), String> {
             let n = pruner.uploads.prune(ttl);
             if n > 0 {
                 eprintln!("uploads: removed {n} expired file(s)");
+            }
+        }
+    });
+
+    // Cancel jobs CUPS has held after a failure for longer than configured.
+    let sweeper = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            let minutes = sweeper.config().stuck_job_minutes;
+            if minutes == 0 {
+                continue;
+            }
+            let age = Duration::from_secs(minutes * 60);
+            match cups::cancel_jobs(&sweeper.ipp, None, true, age).await {
+                Ok(ids) if !ids.is_empty() => eprintln!(
+                    "jobs: canceled {} job(s) held after a printer failure for over {minutes} min: {ids:?}",
+                    ids.len()
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("jobs: checking for stuck jobs: {e}"),
             }
         }
     });

@@ -1,5 +1,6 @@
 //! Printing: printers and their options, uploads, print jobs, the queue.
 //! Open to everyone who can reach the page, like the printer itself.
+//! (Anyone can cancel any job, so canceling several at once is open too.)
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -21,8 +22,11 @@ use crate::{
     uploads::{self, Kind, RemoveOnDrop, Upload},
 };
 
+/// The queues, with the unwanted ones flagged (`cups::flag_unwanted`).
 pub async fn printers(State(st): State<Arc<AppState>>) -> Result<Json<Vec<Printer>>> {
-    Ok(Json(cups::printers(&st.ipp).await?))
+    let mut list = cups::printers(&st.ipp).await?;
+    cups::flag_unwanted(&mut list, &st.driver_schemes, &st.hostname);
+    Ok(Json(list))
 }
 
 pub async fn options(
@@ -365,6 +369,48 @@ pub async fn jobs(
 pub async fn cancel(UrlPath(id): UrlPath<u32>) -> Result<StatusCode> {
     cups::cancel(id).await?;
     eprintln!("print: canceled job {id}");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct CancelQuery {
+    /// Only this printer's jobs; empty for all printers.
+    #[serde(default)]
+    printer: String,
+    /// Only jobs CUPS holds after a failure.
+    #[serde(default)]
+    stuck: bool,
+}
+
+#[derive(Serialize)]
+pub struct Canceled {
+    canceled: Vec<i32>,
+}
+
+/// Cancels all active jobs, or only the stuck ones, on one or all printers.
+pub async fn cancel_many(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<CancelQuery>,
+) -> Result<Json<Canceled>> {
+    let printer = match q.printer.as_str() {
+        "" => None,
+        name if cups::valid_queue_name(name) => Some(name),
+        _ => return Err(AppError::bad_request("invalid printer name")),
+    };
+    let canceled = cups::cancel_jobs(&st.ipp, printer, q.stuck, std::time::Duration::ZERO).await?;
+    if !canceled.is_empty() {
+        eprintln!(
+            "print: canceled {}job(s) {canceled:?}",
+            if q.stuck { "stuck " } else { "" }
+        );
+    }
+    Ok(Json(Canceled { canceled }))
+}
+
+/// Tries a held job again now, e.g. after the printer was switched off and on.
+pub async fn retry(UrlPath(id): UrlPath<u32>) -> Result<StatusCode> {
+    cups::release(id).await?;
+    eprintln!("print: released job {id}");
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -77,8 +77,15 @@ No git on the host? Copy the directory over instead:
    mDNS in `ufw` or `firewalld` if one is active.
 6. Finds the printer's device URI with `lpinfo -v` and creates the shared
    queue, or updates it in place if it already exists. The new queue becomes
-   the default only if the host has no default printer yet.
-7. Prints the URLs for clients.
+   the default only if the host has no default printer yet. When printing
+   fails, the queue holds the job and retries it every few minutes
+   (`printer-error-policy=retry-job`) instead of stopping.
+7. Removes other queues that reach the same printer through a different
+   backend. A desktop often creates one on the stock `usb://` backend with a
+   generic driver when the printer is plugged in before its driver is
+   installed. Such a queue sends the printer data it does not understand,
+   which can jam it until it is switched off and on.
+8. Prints the URLs for clients.
 
 Rerunning is safe: installed packages are skipped and the queue is updated in
 place, so pending jobs are kept.
@@ -121,10 +128,12 @@ Open `http://<host>:8631/` from any browser, phone included. Upload a
 PDF, image or text file, choose the page setup (copies, pages, paper size,
 orientation, scaling, pages per sheet, the printer's own options, and
 two-sided printing by hand for printers without a duplexer) and print it.
-The Jobs page shows and cancels jobs; the Settings page changes printer
-defaults and sharing, adds printers from the profiles in `printers/`, and
-sets an admin password. Set that password: until then anyone on the network
-can change the settings.
+The Jobs page shows, retries and cancels jobs; the Settings page changes
+printer defaults and sharing, adds printers from the profiles in `printers/`,
+cleans up unwanted printers and stuck jobs, and sets an admin password. Jobs
+that CUPS holds because printing failed are canceled after 30 minutes
+(configurable), so they cannot clog the queue. Set the admin password: until
+then anyone on the network can change the settings.
 
 Details, options and security notes:
 [docs/web-interface.md](docs/web-interface.md).
@@ -174,6 +183,8 @@ the printer's page under [docs/printers/](docs/printers/).
 | Clients cannot see the printer | Same network / VLAN as the server; `systemctl status avahi-daemon`. Add it by IPP URL instead (above). |
 | Windows "cannot connect" | Use `http://`, not `https://`, and the `:631` port. |
 | Clients time out | A firewall on the server: open `631/tcp` (IPP) and `5353/udp` (mDNS). `ufw` and `firewalld` are handled automatically. |
+| A job shows "held" and nothing prints | Printing it failed and CUPS retries it every few minutes; `lpstat -l -o` shows why. Switch the printer off and on, then retry it (web interface: Retry, or `lp -i <id> -H resume`) or cancel it. |
+| Several queues for the same printer | `lpstat -v`. Delete the ones not on the driver's backend (`sudo lpadmin -x <name>`, or Settings → Clean up in the web interface); rerunning `install.sh` removes them too. |
 | Web UI refuses the admin login | Log out and back in on the server so your user picks up the `lpadmin` group. |
 | Change defaults (toner density, toner save, paper) | CUPS web UI → Printers → `<queue>` → Administration → "Set Default Options". |
 | Anything else | `sudo cupsctl --debug-logging`, print again, read `/var/log/cups/error_log`. |

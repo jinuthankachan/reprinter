@@ -51,6 +51,7 @@ about 4 mm from the top edge. The parallel port is not supported; use USB.
 | `install.sh` sees a `captusb://` URI but says it does not match | The printer reported a model string the profile does not expect. Rerun with `--uri '<that uri>'` and report the URI so the profile's `PRINTER_URI_REGEX` can be fixed. |
 | Job stuck "Processing", nothing printed | `sudo cupsctl --debug-logging`, print again, then `grep '\] \[Job' /var/log/cups/error_log`. Confirm the queue uses `captusb://` (`lpstat -v`) and the PPD is "Canon LBP1210, captppd 1.0.0", not a Canon "CAPT ver.x" PPD. |
 | Printed once, later jobs hang | Power-cycle the printer, then `sudo cupsenable LBP1210`. Report at https://github.com/darkvision77/captppd/issues with the log. |
+| Job "held", `lpstat -l -o` says `USB backend error: read failed (Operation timed out)` | The printer stopped answering the driver. Most often it got data from another queue for the same printer, e.g. a `usb://` queue with an HP or generic driver that the desktop created when the printer was plugged in (`lpstat -v` lists it). Remove that queue (`sudo lpadmin -x <name>`, web interface: Settings → Clean up; rerunning `install.sh` also does it), switch the printer off and on, then retry the job: `lp -i <id> -H resume` or Retry in the web interface. |
 
 ## If captppd does not work for your unit
 

@@ -6,7 +6,12 @@ next to CUPS. From any browser on the network, including a phone, you can:
 - **Print a file**: upload a PDF, PostScript, JPEG, PNG, GIF, TIFF or plain
   text file, check the preview, choose the page setup and print it. No driver
   or app is needed on the device.
-- **Watch the queue**: active and recent jobs on every printer; cancel jobs.
+- **Watch the queue**: active and recent jobs on every printer, and why a
+  job is not printing; retry or cancel jobs, one at a time or all at once.
+- **Keep the queue clear**: remove unwanted printers, such as a second queue
+  for the same printer on the wrong driver, and stuck jobs. Jobs that CUPS
+  holds because printing them failed are canceled by themselves after a
+  while (30 minutes by default).
 - **Change settings**: printer descriptions, default options (paper size,
   toner density, ...), sharing, device URI; add printers from reprinter's
   profiles; CUPS network sharing; the web interface's own settings and
@@ -123,21 +128,48 @@ second pass of two-sided printing) until "Remove", or until they have not
 been used for the configured time (60 minutes by default). They are also
 deleted when the service restarts.
 
+### Jobs
+
+Active jobs show why they are not printing. A job is **stuck** when CUPS
+holds it because printing it failed, for example because the printer did
+not answer: CUPS then retries it every few minutes. Switch the printer off
+and on, then press **Retry** to try again right away, or **Cancel**.
+**Cancel all** cancels every active job (of the printer picked in the list).
+
+Stuck jobs are canceled by themselves once they are older than "Cancel
+stuck jobs after" (Settings → Web interface; 30 minutes by default, 0 turns
+it off), so a forgotten job does not print hours later. Jobs someone held on
+purpose (`lp -H hold`) and jobs waiting on a disabled printer are left alone.
+
 ### Settings
 
 | Section | What it changes |
 |---------|-----------------|
+| Clean up | Shown when there is something to clean up: unwanted printers (remove them) and stuck jobs (retry or cancel them). |
 | Printers | Description, location, device URI ("Detect" lists devices on the same backend), shared, accepting jobs, enabled; the driver's default options for jobs from every device; make default; test page; delete |
 | Add a printer | Creates a queue from a profile in `printers/`, like `install.sh` does: pick the detected device, the queue name, default paper and sharing. The driver must be installed (`./install.sh --printer <id>`). |
 | Network sharing | `cupsctl --[no-]share-printers --[no-]remote-any --[no-]remote-admin`. Saving restarts CUPS. |
-| Web interface | Upload limit, how long uploads are kept, listen address (needs a restart: `sudo systemctl restart reprinter-web`), admin password |
+| Web interface | Upload limit, how long uploads are kept, when stuck jobs are canceled, listen address (needs a restart: `sudo systemctl restart reprinter-web`), admin password |
+
+A printer is **unwanted** when:
+
+- it reaches the same printer as one of reprinter's queues, but through a
+  different backend. Typically a desktop made it on the stock `usb://`
+  backend with a generic driver when the printer was plugged in before its
+  driver was installed. It sends the printer data it does not understand,
+  which can jam it until it is switched off and on. `install.sh` removes
+  these by itself.
+- it only passes its jobs on to another queue on the same server
+  (`ipp://localhost/printers/...`), as `cups-browsed` sometimes creates.
+
+The Print page marks unwanted printers and never picks one by itself.
 
 ## Security
 
 - **Without an admin password, anyone who can open the page can change the
   settings**, including deleting printers. Set one under Settings → Web
-  interface. Printing, the queue and canceling jobs stay open to everyone
-  on the network, as with the printer itself.
+  interface. Printing, the queue and retrying or canceling jobs (also all at
+  once) stay open to everyone on the network, as with the printer itself.
 - The password is stored as an Argon2 hash in
   `/var/lib/reprinter/config.toml` (readable by the service only). Logins
   last 12 hours or until the service restarts.
@@ -171,6 +203,7 @@ sudo systemctl restart reprinter-web
 | A new printer profile is missing from "Add a printer" | The profiles are built into the binary: rebuild it (`make release`) and run its `install --web-only`. |
 | "Driver not installed" | `sudo reprinter-web install --printer <id>` installs it. |
 | Upload refused as too large | Settings → Web interface → Upload limit. |
+| A job is held and nothing prints | The printer did not take it; the job's note says what the backend reported. Switch the printer off and on, then Retry. If it keeps failing, check Settings → Clean up for an unwanted printer that may have jammed it. |
 | A job fails | Same as any CUPS job: the printer's page under [printers/](printers/), and `/var/log/cups/error_log`. |
 
 ## How it works
@@ -198,13 +231,15 @@ The JSON API under `/api` is what the page uses:
 |-----------------|---|
 | `GET /api/session` | Host name, version, whether a password is set and the caller is logged in |
 | `POST /api/login`, `POST /api/logout` | `{"password": ...}`; session cookie |
-| `GET /api/printers` | Queues and their state |
+| `GET /api/printers` | Queues and their state; `unwanted` says why a queue should be removed |
 | `GET /api/printers/{name}/options` | The driver's options, choices and defaults |
 | `POST /api/uploads` | Multipart field `file`; returns the upload's id and type |
 | `GET`, `DELETE /api/uploads/{id}` | The file (for the preview); remove it |
 | `POST /api/print` | `{"upload_id", "printer", "copies", "collate", "page_ranges", "page_set", "reverse", "orientation", "scaling", "number_up", "options": {...}, "title"}` |
-| `GET /api/jobs?printer=&history=` | Active and finished jobs |
+| `GET /api/jobs?printer=&history=` | Active and finished jobs; `stuck` marks jobs CUPS holds after a failure, `message` is what the backend said |
+| `DELETE /api/jobs?printer=&stuck=` | Cancel all active jobs, of one printer and/or only the stuck ones; returns the ids canceled |
 | `DELETE /api/jobs/{id}` | Cancel a job |
+| `POST /api/jobs/{id}/retry` | Release a held job so CUPS tries it now |
 | `/api/admin/...` | Settings (need the password when one is set) |
 
 Every request other than `GET` needs the header `X-Reprinter: 1`.
@@ -218,7 +253,9 @@ make test-web   # end to end in Docker (Debian 12/13, Ubuntu 22.04/24.04), no pr
 
 `make test-web` (`tests/web-test.sh`) builds the static amd64 binary and puts only that file
 into each container (no checkout), runs `reprinter-web install`, adds a queue
-whose backend writes jobs to files, and drives the API with `curl`: uploads,
-printing with a page setup, queue and cancel, printer settings, adding a
-printer from a profile, CUPS sharing, the admin password and upload limits.
+whose backend writes jobs to files and one whose backend always fails, and
+drives the API with `curl`: uploads, printing with a page setup, queue and
+cancel, printer settings, unwanted printers, stuck jobs (retry and cancel),
+adding a printer from a profile, CUPS sharing, the admin password and the
+web interface settings.
 It ends with a `--web-only` rerun and `uninstall --purge`.

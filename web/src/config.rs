@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_UPLOAD_MB: RangeInclusive<u64> = 1..=1024;
 pub const UPLOAD_TTL_MINUTES: RangeInclusive<u64> = 5..=10080;
+/// 0 turns the automatic cancellation of stuck jobs off.
+pub const STUCK_JOB_MINUTES: RangeInclusive<u64> = 0..=10080;
 
 const HEADER: &str = "# reprinter-web settings. The Settings page rewrites this file;\n\
                       # restart reprinter-web after editing it by hand.\n\n";
@@ -20,6 +22,10 @@ pub struct Config {
     pub max_upload_mb: u64,
     /// Uploaded files are deleted after this long without being printed.
     pub upload_ttl_minutes: u64,
+    /// Jobs CUPS holds after a failure (the printer did not answer, ...) are
+    /// canceled when they are older than this, so they do not sit in the
+    /// queue and print hours later. 0: never.
+    pub stuck_job_minutes: u64,
     /// Argon2 hash of the admin password. Empty: the settings are open.
     pub admin_password_hash: String,
 }
@@ -30,6 +36,7 @@ impl Default for Config {
             listen: "0.0.0.0:8631".into(),
             max_upload_mb: 50,
             upload_ttl_minutes: 60,
+            stuck_job_minutes: 30,
             admin_password_hash: String::new(),
         }
     }
@@ -56,6 +63,9 @@ impl Config {
         self.upload_ttl_minutes = self
             .upload_ttl_minutes
             .clamp(*UPLOAD_TTL_MINUTES.start(), *UPLOAD_TTL_MINUTES.end());
+        self.stuck_job_minutes = self
+            .stuck_job_minutes
+            .clamp(*STUCK_JOB_MINUTES.start(), *STUCK_JOB_MINUTES.end());
     }
 
     /// Writes atomically (temporary file, then rename), readable only by the
@@ -94,6 +104,10 @@ mod tests {
         assert_eq!(c.listen, "0.0.0.0:8631");
         assert_eq!(c.max_upload_mb, 1);
         assert_eq!(c.upload_ttl_minutes, 10080);
+        assert_eq!(c.stuck_job_minutes, 30);
+        let mut c: Config = toml::from_str("stuck_job_minutes = 0").unwrap();
+        c.clamp();
+        assert_eq!(c.stuck_job_minutes, 0);
         assert!(c.admin_password_hash.is_empty());
     }
 

@@ -17,7 +17,7 @@ use super::ok;
 use crate::{
     AppState,
     auth::{self, Admin},
-    config::{MAX_UPLOAD_MB, UPLOAD_TTL_MINUTES},
+    config::{MAX_UPLOAD_MB, STUCK_JOB_MINUTES, UPLOAD_TTL_MINUTES},
     cups::{self, Device, QUICK, SLOW, args},
     error::{AppError, Result},
     profiles::{self, Profile},
@@ -38,6 +38,7 @@ pub async fn settings(_: Admin, State(st): State<Arc<AppState>>) -> Result<Json<
             "running_listen": st.listen,
             "max_upload_mb": config.max_upload_mb,
             "upload_ttl_minutes": config.upload_ttl_minutes,
+            "stuck_job_minutes": config.stuck_job_minutes,
             "password_set": !config.admin_password_hash.is_empty(),
         },
     })))
@@ -102,6 +103,8 @@ pub struct WebUpdate {
     listen: String,
     max_upload_mb: u64,
     upload_ttl_minutes: u64,
+    /// Unchanged when left out.
+    stuck_job_minutes: Option<u64>,
 }
 
 pub async fn set_web(
@@ -129,10 +132,23 @@ pub async fn set_web(
             UPLOAD_TTL_MINUTES.end()
         )));
     }
+    if let Some(minutes) = u
+        .stuck_job_minutes
+        .filter(|m| !STUCK_JOB_MINUTES.contains(m))
+    {
+        return Err(AppError::bad_request(format!(
+            "stuck jobs must be canceled after {}–{} minutes (0: never), not {minutes}",
+            STUCK_JOB_MINUTES.start(),
+            STUCK_JOB_MINUTES.end()
+        )));
+    }
     st.update_config(|c| {
         c.listen = listen.clone();
         c.max_upload_mb = u.max_upload_mb;
         c.upload_ttl_minutes = u.upload_ttl_minutes;
+        if let Some(minutes) = u.stuck_job_minutes {
+            c.stuck_job_minutes = minutes;
+        }
     })?;
     eprintln!("settings: web interface settings saved");
     Ok(Json(
@@ -432,6 +448,9 @@ pub async fn create_printer(
     ]);
     lpadmin.extend(["-o".into(), format!("printer-is-shared={}", n.shared)]);
     lpadmin.extend(["-o".into(), format!("media={paper}")]);
+    // When printing fails, hold the job and retry it later instead of
+    // stopping the queue (see lib/cups.sh).
+    lpadmin.extend(["-o".into(), "printer-error-policy=retry-job".into()]);
     for option in &profile.options {
         lpadmin.extend(["-o".into(), option.clone()]);
     }

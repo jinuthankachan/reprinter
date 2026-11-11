@@ -50,10 +50,20 @@ for opt in $PRINTER_OPTIONS; do
 done
 expect "lpstat -d | grep $queue"
 expect "cupsctl | grep _share_printers=1"
-echo "--- rerun updates the queue in place"
-/src/install.sh "$@" --paper letter >/dev/null
+echo "--- rerun updates the queue in place, and removes queues for the printer on another backend"
+# What the desktop makes when the printer is plugged in before its driver is
+# installed: a queue on the stock usb backend with a generic driver.
+lpadmin -p Desktop -E -v "usb://${FAKE_URI#*://}" -m drv:///sample.drv/laserjet.ppd
+lpadmin -p Other -E -v "usb://Test/OTHER?serial=OTHER" -m drv:///sample.drv/laserjet.ppd
+/src/install.sh "$@" --paper letter >/tmp/rerun.log
 expect "lpstat -v $queue | grep -F \"$FAKE_URI\""
 expect "lpoptions -p $queue -l | grep \"^PageSize.*\*Letter\""
+expect "grep \"Removing queue .Desktop.\" /tmp/rerun.log"
+expect "! lpstat -v Desktop 2>/dev/null"
+expect "lpstat -v Other"
+lpadmin -x Other
+# cupsd writes printers.conf when it restarts at the latest, which the rerun did.
+expect "sed -n \"/Printer $queue>/,/<.Printer>/p\" /etc/cups/printers.conf | grep -x \"ErrorPolicy retry-job\""
 echo "--- --local makes it unshared"
 /src/install.sh "$@" --local >/dev/null
 expect "lpoptions -p $queue | grep printer-is-shared=false"

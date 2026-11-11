@@ -179,4 +179,5 @@ else
 fi
 
 cups_create_queue
+cups_remove_conflicting_queues
 cups_report

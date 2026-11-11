@@ -4,8 +4,9 @@
 # so this also proves it is self-contained: `reprinter-web install` sets up
 # CUPS, the driver and the LBP-1210 queue on a fake device URI, and itself as
 # the service. A second queue prints into files through a capture backend,
-# and the API is exercised with curl while reprinter-web runs as its service
-# user. Ends with `reprinter-web uninstall --purge`.
+# a third fails like a printer that does not answer, and the API is exercised
+# with curl while reprinter-web runs as its service user. Ends with
+# `reprinter-web uninstall --purge`.
 #
 #   tests/web-test.sh                      # Debian 12/13, Ubuntu 22.04/24.04
 #   tests/web-test.sh debian:13            # chosen images
@@ -58,6 +59,14 @@ if [ -n "${6:-}" ]; then cat "$6"; else cat; fi >/tmp/capture/job-$1.out
 EOF
 chmod 755 /usr/lib/cups/backend/capture
 lpadmin -p Capture -E -v capture:/out -m drv:///sample.drv/laserjet.ppd 2>/dev/null
+# A backend that fails every job, like a printer that does not answer.
+cat >/usr/lib/cups/backend/fail <<"EOF"
+#!/bin/sh
+if [ $# -eq 0 ]; then echo "direct fail:/x \"Fail\" \"Printer that does not answer\""; exit 0; fi
+echo "ERROR: read failed (Operation timed out)" >&2
+exit 1
+EOF
+chmod 755 /usr/lib/cups/backend/fail
 
 # No systemd in the container: start it the way the unit does.
 runuser -u reprinter -- /usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml >/tmp/web.log 2>&1 &
@@ -137,6 +146,28 @@ job=$(send POST /admin/printers/Capture/test-page | jq -r .job_id)
 expect "wait_done Capture $job"
 expect "get /admin/printers/Capture/devices | jq -e '\''.[0].uri == \"capture:/out\" and .[0].matches'\''"
 
+echo "--- unwanted printers: a usb:// queue for the LBP1210, as the desktop makes them"
+lpadmin -p Desktop -E -v "usb://Test/CONTAINER?serial=CONTAINER" -m drv:///sample.drv/laserjet.ppd 2>/dev/null
+expect "get /printers | jq -e '\''.[] | select(.name==\"Desktop\") | .unwanted | test(\"same printer as LBP1210\")'\''"
+expect "get /printers | jq -e '\''map(select(.name != \"Desktop\") | .unwanted) | all(. == null)'\''"
+send DELETE /admin/printers/Desktop >/dev/null
+expect "! lpstat -v Desktop"
+
+echo "--- stuck jobs: held after the printer failed, retry, cancel"
+lpadmin -p Failing -E -v fail:/x -m drv:///sample.drv/laserjet.ppd -o printer-error-policy=retry-job 2>/dev/null
+stuck() { get "/jobs?printer=Failing&history=false" | jq -e --argjson id "$1" '\''.active[] | select(.id==$id) | .state == "held" and .stuck and (.message | type) == "string"'\''; }
+wait_stuck() { for _ in $(seq 1 60); do stuck "$1" >/dev/null 2>&1 && return 0; sleep 0.5; done; return 1; }
+job=$(send POST /print "{\"upload_id\":\"$txt\",\"printer\":\"Failing\"}" | jq -r .job_id)
+id=${job#Failing-}
+expect "wait_stuck $id"
+expect "test \"\$(code -X POST -H X-Reprinter:1 $B/jobs/$id/retry)\" = 204"
+expect "wait_stuck $id"
+expect "send DELETE \"/jobs?printer=Capture&stuck=true\" | jq -e '\''.canceled == []'\''"
+expect "send DELETE \"/jobs?printer=Failing&stuck=true\" | jq -e --argjson id $id '\''.canceled == [\$id]'\''"
+expect "get /jobs | jq -e --argjson id $id '\''any(.finished[]; .id==\$id and .state==\"canceled\")'\''"
+expect "test \"\$(code -X DELETE -H X-Reprinter:1 \"$B/jobs?printer=../x\")\" = 400"
+lpadmin -x Failing
+
 echo "--- add a printer from a profile"
 expect "get /admin/profiles | jq -e '\''.profiles[] | select(.id==\"canon-lbp1210\") | .driver_installed and .queue_exists and .uri_scheme == \"captusb\"'\''"
 expect "get /admin/profiles/canon-lbp1210/devices | jq -e '\''type == \"array\"'\''"
@@ -179,8 +210,13 @@ expect "runuser -u reprinter -- /usr/local/bin/reprinter-web --config /var/lib/r
 expect "! grep -q \"admin_password_hash = \\\"\\\$argon2\" /var/lib/reprinter/config.toml"
 
 echo "--- web settings"
-send PUT /admin/web "{\"listen\":\"0.0.0.0:8631\",\"max_upload_mb\":1,\"upload_ttl_minutes\":30}" >/dev/null
+expect "get /admin/settings | jq -e '\''.web.stuck_job_minutes == 30'\''"
+send PUT /admin/web "{\"listen\":\"0.0.0.0:8631\",\"max_upload_mb\":1,\"upload_ttl_minutes\":30,\"stuck_job_minutes\":0}" >/dev/null
 expect "grep -q \"max_upload_mb = 1\$\" /var/lib/reprinter/config.toml"
+expect "grep -q \"stuck_job_minutes = 0\$\" /var/lib/reprinter/config.toml"
+send PUT /admin/web "{\"listen\":\"0.0.0.0:8631\",\"max_upload_mb\":1,\"upload_ttl_minutes\":30}" >/dev/null
+expect "grep -q \"stuck_job_minutes = 0\$\" /var/lib/reprinter/config.toml"
+expect "test \"\$(code -X PUT -H X-Reprinter:1 -H Content-Type:application/json -d \"{\\\"listen\\\":\\\"0.0.0.0:8631\\\",\\\"max_upload_mb\\\":1,\\\"upload_ttl_minutes\\\":30,\\\"stuck_job_minutes\\\":99999}\" $B/admin/web)\" = 400"
 head -c 1500000 /dev/zero | tr "\0" a >/tmp/big.txt
 expect "test \"\$(code -H X-Reprinter:1 -F file=@/tmp/big.txt $B/uploads)\" = 413"
 expect "test \"\$(code -X PUT -H X-Reprinter:1 -H Content-Type:application/json -d \"{\\\"listen\\\":\\\"nope\\\",\\\"max_upload_mb\\\":1,\\\"upload_ttl_minutes\\\":30}\" $B/admin/web)\" = 400"
@@ -195,6 +231,7 @@ echo "--- rerun with --web-only, then uninstall"
 /usr/local/bin/reprinter-web install --web-only --port 8632 >/tmp/reinstall.log 2>&1 || { cat /tmp/reinstall.log; exit 1; }
 expect "grep -qF \"listen = \\\"0.0.0.0:8632\\\"\" /var/lib/reprinter/config.toml"
 expect "grep -q \"max_upload_mb = 1\$\" /var/lib/reprinter/config.toml"
+expect "grep -q \"stuck_job_minutes = 0\$\" /var/lib/reprinter/config.toml"
 pkill -x reprinter-web || true
 sleep 0.5
 /opt/reprinter-web uninstall --purge >/tmp/uninstall.log 2>&1 || { cat /tmp/uninstall.log; exit 1; }

@@ -46,8 +46,9 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(print::upload_file).delete(print::upload_delete),
         )
         .route("/print", post(print::print))
-        .route("/jobs", get(print::jobs))
+        .route("/jobs", get(print::jobs).delete(print::cancel_many))
         .route("/jobs/{id}", axum::routing::delete(print::cancel))
+        .route("/jobs/{id}/retry", post(print::retry))
         .route("/admin/settings", get(admin::settings))
         .route("/admin/cups", put(admin::set_cups))
         .route("/admin/web", put(admin::set_web))
