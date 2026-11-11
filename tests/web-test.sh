@@ -8,7 +8,7 @@
 # with curl while reprinter-web runs as its service user. Ends with
 # `reprinter-web uninstall --purge`.
 #
-#   tests/web-test.sh                      # Debian 12/13, Ubuntu 22.04/24.04
+#   tests/web-test.sh                      # Debian 12/13, Ubuntu 22.04/24.04, Arch
 #   tests/web-test.sh debian:13            # chosen images
 #   BIN=path/to/reprinter-web tests/web-test.sh
 #
@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 read -r -a DOCKER_OPTS <<<"${DOCKER_OPTS:-}"
 
 images=("$@")
-[ ${#images[@]} -gt 0 ] || images=(debian:12 debian:13 ubuntu:22.04 ubuntu:24.04)
+[ ${#images[@]} -gt 0 ] || images=(debian:12 debian:13 ubuntu:22.04 ubuntu:24.04 archlinux:latest)
 
 if [ -z "${BIN:-}" ]; then
   "$ROOT/web/build-release.sh" amd64 >/dev/null
@@ -33,6 +33,7 @@ BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 # shellcheck disable=SC2016 # expanded inside the container
 check='
 set -euo pipefail
+/prep.sh
 expect() { if eval "$1" >/dev/null 2>&1; then echo "ok   $1"; else echo "FAIL $1"; [ -f /tmp/web.log ] && tail -20 /tmp/web.log; exit 1; fi; }
 
 echo "--- reprinter-web install: CUPS, driver, LBP1210 queue (fake URI) and the web interface in one step"
@@ -41,7 +42,9 @@ expect "/opt/reprinter-web install --list | grep -q canon-lbp1210"
   { tail -40 /tmp/install.log; exit 1; }
 expect "lpstat -v LBP1210 | grep -qF captusb://Test/CONTAINER"
 expect "lpoptions -p LBP1210 | grep -q printer-is-shared=true"
-expect "id -nG reprinter | grep -qw lpadmin"
+# The CUPS admin group: lpadmin on Debian, sys on Arch.
+admin_group=$(sed -n "s/^SystemGroup //p" /etc/cups/cups-files.conf | tr " " "\n" | grep -vxE "root|wheel" | head -n1)
+expect "id -nG reprinter | grep -qw ${admin_group:-lpadmin}"
 expect "cmp -s /opt/reprinter-web /usr/local/bin/reprinter-web"
 expect "grep -q \"^ExecStart=/usr/local/bin/reprinter-web --config /var/lib/reprinter/config.toml\$\" /etc/systemd/system/reprinter-web.service"
 expect "grep -qF \"listen = \\\"0.0.0.0:8631\\\"\" /var/lib/reprinter/config.toml"
@@ -49,7 +52,11 @@ expect "test \"\$(stat -c %U:%a /var/lib/reprinter/config.toml)\" = reprinter:60
 expect "grep -q \"admin_password_hash = \\\"\\\$argon2\" /var/lib/reprinter/config.toml"
 expect "grep -qE \"^Admin password for the Settings page: [a-z0-9]{4}(-[a-z0-9]{4}){3}\$\" /tmp/install.log"
 expect "! ls -d /tmp/reprinter-install-*"
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq >/dev/null
+if command -v pacman >/dev/null; then
+  pacman -S --needed --noconfirm jq >/dev/null
+else
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq >/dev/null
+fi
 
 # A queue whose backend writes each job to /tmp/capture, with a driver that
 # has a Duplex option (the LBP-1210 has none).
@@ -278,7 +285,7 @@ failed=()
 for img in "${images[@]}"; do
   echo "=================== $img"
   if docker run --rm "${DOCKER_OPTS[@]}" -v "$BIN:/opt/reprinter-web:ro" \
-    "$img" bash -c "$check"; then
+    -v "$ROOT/tests/container-prep.sh:/prep.sh:ro" "$img" bash -c "$check"; then
     echo "=================== $img: PASS"
   else
     echo "=================== $img: FAIL"

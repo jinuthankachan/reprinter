@@ -32,9 +32,13 @@ os_field() {
   sed -n "s/^$1=//p" /etc/os-release | head -n1 | tr -d "\"'"
 }
 
-# Sets OS_ID, OS_PRETTY, ARCH. Dies on unsupported systems.
-# Only apt/dpkg systems so far; another family needs pkg_install and the
-# driver modules' package steps taught its package manager.
+# Sets OS_ID, OS_PRETTY, PKG_FAMILY and ARCH. Dies on unsupported systems.
+#   PKG_FAMILY  deb (apt/dpkg: Debian, Ubuntu, Raspberry Pi OS, ...) or
+#               arch (pacman: Arch Linux, Manjaro, EndeavourOS, ...)
+#   ARCH        the package manager's architecture name: dpkg's on deb
+#               (amd64, arm64, armhf, ...), pacman's on arch (x86_64, aarch64, ...)
+# Another family needs pkg_install, cups_install_stack and the driver modules'
+# package steps taught its package manager.
 platform_detect() {
   [ -r /etc/os-release ] || die "/etc/os-release not found; cannot identify the distribution"
   OS_ID="$(os_field ID)"
@@ -43,23 +47,58 @@ platform_detect() {
   like="$(os_field ID_LIKE)"
 
   case " $OS_ID $like " in
-    *" debian "* | *" ubuntu "*) ;;
-    *) die "Unsupported distribution: ${OS_PRETTY:-$OS_ID}. Only Debian-family systems (Debian, Ubuntu, Raspberry Pi OS, Mint, ...) are supported so far." ;;
+    *" debian "* | *" ubuntu "*)
+      PKG_FAMILY=deb
+      have dpkg || die "dpkg not found"
+      ARCH="$(dpkg --print-architecture)"
+      ;;
+    *" arch "* | *" archarm "*)
+      PKG_FAMILY=arch
+      have pacman || die "pacman not found"
+      ARCH="$(uname -m)"
+      ;;
+    *) die "Unsupported distribution: ${OS_PRETTY:-$OS_ID}. Supported: Debian-family systems (Debian, Ubuntu, Raspberry Pi OS, Mint, ...) and Arch-family systems (Arch Linux, Manjaro, EndeavourOS, ...)." ;;
   esac
-
-  have dpkg || die "dpkg not found"
-  ARCH="$(dpkg --print-architecture)"
 }
 
 APT_UPDATED=0
-# Install distribution packages. Extra apt options (e.g. --no-install-recommends)
-# may be passed along with package names.
+# Install distribution packages. Package names differ between families, so
+# callers pass the names for $PKG_FAMILY. On deb, apt options (e.g.
+# --no-install-recommends) may be passed along with the names.
 pkg_install() {
-  if [ "$APT_UPDATED" -eq 0 ]; then
-    as_root apt-get update
-    APT_UPDATED=1
+  case "$PKG_FAMILY" in
+    deb)
+      if [ "$APT_UPDATED" -eq 0 ]; then
+        as_root apt-get update
+        APT_UPDATED=1
+      fi
+      as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+      ;;
+    arch)
+      # Only what is missing (pacman -T lists it), so reruns stay quiet.
+      local missing
+      mapfile -t missing < <(pacman -T "$@" || true)
+      [ ${#missing[@]} -gt 0 ] || return 0
+      # No -y: refreshing the package lists without upgrading the system is a
+      # partial upgrade, which Arch does not support.
+      as_root pacman -S --needed --noconfirm "${missing[@]}" ||
+        die "pacman could not install: ${missing[*]}. If the package database is out of date, update the system first (sudo pacman -Syu) and rerun."
+      ;;
+  esac
+}
+
+# This host's name, without needing the hostname command (not in Arch's base).
+host_name() {
+  cat /proc/sys/kernel/hostname 2>/dev/null || uname -n
+}
+
+# This host's first global IPv4 address, or nothing.
+host_ip() {
+  if have ip; then
+    ip -4 -o addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4; exit }'
+  elif have hostname; then
+    hostname -I 2>/dev/null | awk '{print $1}'
   fi
-  as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
 }
 
 # Enable and (re)start a system service. Works with systemd and with SysV-style

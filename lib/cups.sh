@@ -8,8 +8,35 @@ cups_install_stack() {
   log "Installing CUPS, cups-filters, Ghostscript, Avahi, libusb"
   # Ghostscript does the rasterising; Avahi advertises queues (mDNS/Bonjour,
   # IPP Everywhere, AirPrint) so clients find them without configuration.
-  pkg_install cups cups-filters ghostscript avahi-daemon libusb-1.0-0 \
-    usbutils curl ca-certificates
+  case "$PKG_FAMILY" in
+    deb) pkg_install cups cups-filters ghostscript avahi-daemon libusb-1.0-0 \
+      usbutils curl ca-certificates ;;
+    # Arch's cups-filters pulls in no font, and printing text needs one
+    # ("cfFilterTextToPDF: No viable font found" on a headless host).
+    arch) pkg_install cups cups-filters ghostscript avahi libusb ttf-dejavu \
+      usbutils curl ca-certificates ;;
+  esac
+}
+
+# Groups whose members may administer CUPS (cups-files.conf SystemGroup):
+# lpadmin on Debian, "sys root wheel" on Arch. One per line.
+cups_admin_groups() {
+  local groups
+  groups="$(as_root sed -n 's/^[[:space:]]*SystemGroup[[:space:]]//p' /etc/cups/cups-files.conf 2>/dev/null || true)"
+  [ -n "$groups" ] || groups=lpadmin
+  # shellcheck disable=SC2086 # one group per word
+  printf '%s\n' $groups
+}
+
+# The CUPS admin group to add a user to: the first SystemGroup that exists,
+# leaving out root and wheel (wheel usually also grants sudo).
+cups_admin_group() {
+  local g
+  for g in $(cups_admin_groups); do
+    case "$g" in root | wheel) continue ;; esac
+    getent group "$g" >/dev/null && { echo "$g"; return; }
+  done
+  return 1
 }
 
 cups_wait() {
@@ -39,13 +66,19 @@ firewall_open() {
   fi
 }
 
+ADMIN_GROUP=""
+
 cups_configure() {
   local user
   user="$(admin_user)"
-  if [ -n "$user" ] && ! id -nG "$user" | tr ' ' '\n' | grep -qx lpadmin; then
-    log "Adding $user to the lpadmin group (CUPS administration)"
-    as_root usermod -aG lpadmin "$user"
-    NEED_RELOGIN=1
+  if [ -n "$user" ] && ! id -nG "$user" | tr ' ' '\n' | grep -qxF -f <(cups_admin_groups); then
+    if ADMIN_GROUP="$(cups_admin_group)"; then
+      log "Adding $user to the $ADMIN_GROUP group (CUPS administration)"
+      as_root usermod -aG "$ADMIN_GROUP" "$user"
+      NEED_RELOGIN=1
+    else
+      warn "no CUPS admin group found (SystemGroup in /etc/cups/cups-files.conf); $user cannot administer CUPS without root"
+    fi
   fi
 
   cups_restart
@@ -108,7 +141,7 @@ cups_create_queue() {
   log "$verb queue '$QUEUE'"
   # Modifies an existing queue in place (keeps pending jobs) or creates it.
   as_root lpadmin -p "$QUEUE" -E -v "$URI" -m "$PRINTER_PPD" \
-    -L "$(hostname)" -D "$PRINTER_MODEL ($PRINTER_DRIVER)" "${opts[@]}"
+    -L "$(host_name)" -D "$PRINTER_MODEL ($PRINTER_DRIVER)" "${opts[@]}"
   as_root cupsenable "$QUEUE"
   as_root cupsaccept "$QUEUE"
 
@@ -170,8 +203,8 @@ cups_remove_conflicting_queues() {
 
 cups_report() {
   local ip host
-  host="$(hostname)"
-  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  host="$(host_name)"
+  ip="$(host_ip)"
   [ -n "$ip" ] || ip="<this-host-ip>"
 
   log "Done"
@@ -198,6 +231,6 @@ Test print from this host:
 EOT
   if [ "$NEED_RELOGIN" -eq 1 ]; then
     echo
-    echo "Log out and back in once so your user picks up the lpadmin group."
+    echo "Log out and back in once so your user picks up the $ADMIN_GROUP group."
   fi
 }

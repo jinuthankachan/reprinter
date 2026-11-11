@@ -11,8 +11,8 @@
 //! settings. In the background it cancels jobs that CUPS has held after a
 //! printer failure for too long, so they do not clog the queue. It reads
 //! state from the local scheduler over IPP and makes changes with the CUPS
-//! command-line tools, so it runs as an unprivileged user in the `lpadmin`
-//! group (see reprinter-web.service).
+//! command-line tools, so it runs as an unprivileged user in the CUPS admin
+//! group, `lpadmin` or `sys` (see reprinter-web.service).
 
 mod auth;
 mod config;

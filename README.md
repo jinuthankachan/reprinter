@@ -23,10 +23,10 @@ LBP810, LBP1120 and LBP3200, so each of those only needs a profile. See
 
 | | |
 |---|---|
-| Distributions | Debian 12 / 13, Ubuntu 22.04 / 24.04 and newer, Raspberry Pi OS (Bookworm / Trixie), and their derivatives (Linux Mint, Pop!_OS, ...) |
-| Architectures | **amd64 (x86-64)**, **arm64**, **armhf**: prebuilt driver package. Other architectures, and 32-bit Debian 13 / Ubuntu 24.04, build the driver from source automatically. |
+| Distributions | Debian 12 / 13, Ubuntu 22.04 / 24.04 and newer, Raspberry Pi OS (Bookworm / Trixie), and their derivatives (Linux Mint, Pop!_OS, ...). Arch Linux and its derivatives (Manjaro, EndeavourOS, ...). |
+| Architectures | **amd64 (x86-64)**, **arm64**, **armhf**: prebuilt driver package on Debian-family hosts. Other architectures, 32-bit Debian 13 / Ubuntu 24.04, and Arch on every architecture build the driver from source automatically. |
 | Init system | systemd, or SysV `service` (containers) |
-| Not yet | Fedora / RHEL, Arch, openSUSE |
+| Not yet | Fedora / RHEL, openSUSE |
 
 Any machine that runs one of these and has a USB port will do. For a
 Raspberry Pi, start with [docs/raspberry-pi.md](docs/raspberry-pi.md).
@@ -39,7 +39,8 @@ as a user with sudo rights. Either way sets up the same print server.
 **One file**, with the [web interface](#web-interface):
 
 ```sh
-curl -fLo reprinter-web https://github.com/jinuthankachan/reprinter/releases/latest/download/reprinter-web-$(dpkg --print-architecture)
+arch=$(dpkg --print-architecture 2>/dev/null || uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv[67]l/armhf/')
+curl -fLo reprinter-web https://github.com/jinuthankachan/reprinter/releases/latest/download/reprinter-web-$arch
 chmod +x reprinter-web
 sudo ./reprinter-web install
 ```
@@ -48,7 +49,8 @@ sudo ./reprinter-web install
 nothing else is needed: it runs the steps below, then installs itself as the
 web interface service. It takes the same options as `install.sh` plus a few
 of its own (`./reprinter-web install --help`). The binaries (`amd64`,
-`arm64`, `armhf`) are static and run on every supported release; the release
+`arm64`, `armhf`; the first line maps Arch's `x86_64` / `aarch64` to these
+names) are static and run on every supported release; the release
 page has their `SHA256SUMS`. To build them yourself: `make release` (see
 [Development](#development)).
 
@@ -66,13 +68,19 @@ No git on the host? Copy the directory over instead:
 `install.sh` does the following:
 
 1. Detects which supported printer is on USB (or takes `--printer`).
-2. Installs `cups`, `cups-filters`, `ghostscript` and `avahi-daemon`.
+2. Installs `cups`, `cups-filters`, `ghostscript` and `avahi-daemon` (on Arch
+   `avahi`, plus `ttf-dejavu`: printing text needs a font, and Arch's
+   `cups-filters` brings none).
 3. Installs the printer's driver: the upstream prebuilt package for the host's
    architecture, verified by SHA-256, or a build from the pinned upstream
-   source when no prebuilt package fits.
+   source when no prebuilt package fits. On Arch the build is a pacman package
+   made with `makepkg`, so `pacman -R` removes it. Arch does not support
+   partial upgrades, so `install.sh` does not refresh the package lists: when
+   pacman cannot find a package, run `sudo pacman -Syu` and rerun.
 4. Applies host tweaks the driver needs (for CAPT printers, it blacklists the
    `usblp` kernel module).
-5. Adds your user to `lpadmin`, shares printers with the local network
+5. Adds your user to the CUPS admin group (`lpadmin`; on Arch `sys`, unless
+   you are already in `wheel`), shares printers with the local network
    (`cupsctl --share-printers`; CUPS administration stays on the host), and
    opens IPP and mDNS in `ufw` or `firewalld` if one is active.
 6. Finds the printer's device URI with `lpinfo -v` and creates the shared
@@ -186,7 +194,7 @@ the printer's page under [docs/printers/](docs/printers/).
 | Clients time out | A firewall on the server: open `631/tcp` (IPP) and `5353/udp` (mDNS). `ufw` and `firewalld` are handled automatically. |
 | A job shows "held" and nothing prints | Printing it failed and CUPS retries it every few minutes; `lpstat -l -o` shows why. Switch the printer off and on, then retry it (web interface: Retry, or `lp -i <id> -H resume`) or cancel it. |
 | Several queues for the same printer | `lpstat -v`. Delete the ones not on the driver's backend (`sudo lpadmin -x <name>`, or Settings → Clean up in the web interface); rerunning `install.sh` removes them too. |
-| Web UI refuses the admin login | Log out and back in on the server so your user picks up the `lpadmin` group. |
+| Web UI refuses the admin login | Log out and back in on the server so your user picks up the `lpadmin` group (`sys` on Arch). |
 | Change defaults (toner density, toner save, paper) | CUPS web UI → Printers → `<queue>` → Administration → "Set Default Options". |
 | Anything else | `sudo cupsctl --debug-logging`, print again, read `/var/log/cups/error_log`. |
 
@@ -200,13 +208,14 @@ administer CUPS from other machines, `sudo cupsctl --remote-admin`.
   there can print and view the CUPS web UI, and CUPS administration is
   allowed from the server only. `sudo cupsctl --remote-any` opens printing to
   every network, and `--remote-admin` administration from other machines
-  (it needs the password of a user in `lpadmin`). Do not expose port 631 to
+  (it needs the password of a user in `lpadmin`, or `sys` / `wheel` on Arch). Do not expose port 631 to
   the Internet; on such a host use `--local` or a firewall.
 - Prebuilt driver packages are checked against pinned SHA-256 digests and
   source builds against a pinned upstream commit. A mismatch stops the install.
 - The web interface (port 8631) lets anyone on the network print; its
   settings need the admin password `reprinter-web install` sets. It runs as
-  an unprivileged `reprinter` user in the `lpadmin` group. See
+  an unprivileged `reprinter` user in the CUPS admin group (`lpadmin`, or
+  `sys` on Arch). See
   [docs/web-interface.md](docs/web-interface.md#security).
 
 ## Uninstall
@@ -216,7 +225,7 @@ For the default LBP-1210 setup:
 ```sh
 sudo reprinter-web uninstall --purge   # if the web interface is installed
 sudo lpadmin -x LBP1210
-sudo apt remove captppd
+sudo apt remove captppd                # Arch: sudo pacman -R captppd
 sudo rm /etc/modprobe.d/blacklist-usblp.conf
 sudo cupsctl --no-remote-any --no-remote-admin --no-share-printers
 ```
@@ -235,6 +244,7 @@ web/                     reprinter-web: web interface and one-file installer (sr
 .github/workflows/       release builds of the reprinter-web binaries
 docs/                    host guides, printer notes, web interface, contributor guide
 tests/container-test.sh  Docker smoke tests (no printer needed)
+tests/container-prep.sh  readies a bare Docker image (Arch: package lists, a `service` for CUPS)
 tests/web-test.sh        Docker end-to-end tests of the web interface
 ```
 
@@ -250,7 +260,7 @@ printers that use an existing driver only need a profile. See
 | Command | What it does |
 |---------|--------------|
 | `make build` | Build `reprinter-web` for this machine (`web/target/release/`) |
-| `make run` | Run the web interface on `http://127.0.0.1:8631/` against this machine's CUPS, with the printer profiles from the checkout. Settings and uploads go to `web/dev/`. Changing printers needs your user in `lpadmin`. |
+| `make run` | Run the web interface on `http://127.0.0.1:8631/` against this machine's CUPS, with the printer profiles from the checkout. Settings and uploads go to `web/dev/`. Changing printers needs your user in `lpadmin` (`sys` or `wheel` on Arch). |
 | `make test` | Unit tests |
 | `make lint` | `cargo fmt --check`, clippy, shell syntax, and shellcheck if it is installed |
 | `make check` | `lint`, then `test` |
@@ -277,8 +287,8 @@ make uninstall PURGE=1
 
 Building needs Rust ([rustup](https://rustup.rs)); `release` and `test-web`
 build static binaries, and rustup adds the musl targets they need. The
-`test-*` targets need Docker, but no printer: they cover Debian 12/13 and
-Ubuntu 22.04/24.04.
+`test-*` targets need Docker, but no printer: they cover Debian 12/13,
+Ubuntu 22.04/24.04 and Arch Linux.
 
 ### Releasing
 

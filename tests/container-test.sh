@@ -4,12 +4,14 @@
 # fake device URI and checked.
 #
 #   tests/container-test.sh                         # default image set
-#   tests/container-test.sh debian:13 ubuntu:24.04  # chosen images
+#   tests/container-test.sh debian:13 archlinux     # chosen images
 #   FROM_SOURCE=1 tests/container-test.sh debian:13 # exercise the source build
 #   PROFILE=canon-lbp1210 tests/container-test.sh   # profile under test
 #
-# Images must be Debian-family and match the host architecture (or have
-# qemu binfmt set up for cross-architecture runs, e.g. --platform via DOCKER_OPTS).
+# Images must be Debian- or Arch-family and match the host architecture (or
+# have qemu binfmt set up for cross-architecture runs, e.g. --platform via
+# DOCKER_OPTS). tests/container-prep.sh runs first in each.
+# On Arch the driver is always built from source, so FROM_SOURCE changes nothing there.
 
 set -euo pipefail
 
@@ -18,7 +20,7 @@ PROFILE="${PROFILE:-canon-lbp1210}"
 read -r -a DOCKER_OPTS <<<"${DOCKER_OPTS:-}"
 
 images=("$@")
-[ ${#images[@]} -gt 0 ] || images=(debian:12 debian:13 ubuntu:22.04 ubuntu:24.04)
+[ ${#images[@]} -gt 0 ] || images=(debian:12 debian:13 ubuntu:22.04 ubuntu:24.04 archlinux:latest)
 
 # Fake device URI on the driver's own backend scheme: cupsd refuses URIs whose
 # backend is not installed, so this also proves the driver installed it.
@@ -36,6 +38,7 @@ args=(--printer "$PROFILE" --uri "$fake_uri")
 # shellcheck disable=SC2016 # expanded inside the container
 check='
 set -euo pipefail
+/prep.sh
 expect() { if eval "$1" >/dev/null; then echo "ok   $1"; else echo "FAIL $1"; exit 1; fi; }
 . "/src/printers/$PROFILE.conf"
 queue="$PRINTER_QUEUE"
@@ -76,6 +79,7 @@ failed=()
 for img in "${images[@]}"; do
   echo "=================== $img"
   if docker run --rm "${DOCKER_OPTS[@]}" -v "$ROOT:/src:ro" \
+    -v "$ROOT/tests/container-prep.sh:/prep.sh:ro" \
     -e PROFILE="$PROFILE" -e FAKE_URI="$fake_uri" "$img" \
     bash -c "$check" _ "${args[@]}"; then
     echo "=================== $img: PASS"

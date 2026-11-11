@@ -28,7 +28,8 @@ reprinter's installer (`install.sh` with `lib/`, `drivers/` and
 `printers/`), so one command sets up the whole print server:
 
 ```sh
-curl -fLo reprinter-web https://github.com/jinuthankachan/reprinter/releases/latest/download/reprinter-web-$(dpkg --print-architecture)
+arch=$(dpkg --print-architecture 2>/dev/null || uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv[67]l/armhf/')
+curl -fLo reprinter-web https://github.com/jinuthankachan/reprinter/releases/latest/download/reprinter-web-$arch
 chmod +x reprinter-web
 sudo ./reprinter-web install
 ```
@@ -42,7 +43,9 @@ printed at the end of the install.
    queue for the printer on USB (see the [README](../README.md#quick-start)).
    It is unpacked into a private temporary directory and removed afterwards.
 2. Copies itself to `/usr/local/bin/reprinter-web`.
-3. Creates the `reprinter` system user and adds it to `lpadmin`.
+3. Creates the `reprinter` system user and adds it to the CUPS admin group:
+   the first group in `SystemGroup` of `/etc/cups/cups-files.conf` other than
+   `root` and `wheel`, so `lpadmin` on Debian and `sys` on Arch.
 4. Writes `/var/lib/reprinter/config.toml` if it does not exist. When no
    admin password is set, it sets a random one and prints it at the end.
 5. Installs and starts the `reprinter-web` systemd service, and opens its
@@ -70,7 +73,8 @@ Printers, CUPS and drivers stay; the README's Uninstall section removes them.
 
 ### The binaries
 
-There is one per architecture, named after `dpkg --print-architecture`:
+There is one per architecture, named after `dpkg --print-architecture`
+(on Arch: `x86_64` is `amd64`, `aarch64` is `arm64`):
 
 | File | Hosts |
 |------|-------|
@@ -79,8 +83,8 @@ There is one per architecture, named after `dpkg --print-architecture`:
 | `reprinter-web-armhf` | 32-bit Raspberry Pi OS (ARMv6 and newer, so every Pi) and other 32-bit ARM |
 
 They are statically linked (musl), so they do not depend on the host's C
-library and run on every supported Debian, Ubuntu and Raspberry Pi OS
-release. Check them against `SHA256SUMS` from the same release:
+library and run on every supported Debian, Ubuntu, Raspberry Pi OS and
+Arch release. Check them against `SHA256SUMS` from the same release:
 `sha256sum -c --ignore-missing SHA256SUMS`.
 
 Pushing a version tag (`git tag v0.1.0 && git push origin v0.1.0`) builds
@@ -197,7 +201,8 @@ The Print page marks unwanted printers and never picks one by itself.
   the Internet. Do not forward the port on your router; use `--local` on a
   host that is reachable from outside.
 - The service runs as the unprivileged `reprinter` user under systemd
-  sandboxing. Its `lpadmin` membership is what lets it manage printers; CUPS
+  sandboxing. Its membership of the CUPS admin group (`lpadmin`, or `sys` on
+  Arch) is what lets it manage printers; CUPS
   checks it over its local socket. It never runs a shell: options are
   validated (printer options against the driver's own choices) and passed to
   the CUPS tools as separate arguments.
@@ -222,7 +227,7 @@ sudo reprinter-web install --web-only
 | Login says "too many login attempts" | Many logins are being sent at once, e.g. by something guessing the password. Try again in a minute. |
 | Upload refused: "the server holds too many uploaded files" | Remove files you no longer need, or wait until unused ones expire (Settings → Web interface). |
 | "cannot reach CUPS" | `systemctl status cups`. The service talks to `/run/cups/cups.sock`. |
-| Changing a printer says "Forbidden" or "Unauthorized" | The `reprinter` user must be in `lpadmin`: `id reprinter`. Rerun `sudo reprinter-web install --web-only`. |
+| Changing a printer says "Forbidden" or "Unauthorized" | The `reprinter` user must be in the CUPS admin group (`lpadmin`, or `sys` on Arch): `id reprinter`. Rerun `sudo reprinter-web install --web-only`. |
 | Network sharing: "CUPS on this server only lets root change these settings" | Some CUPS builds (Ubuntu 24.04) refuse configuration changes from anyone but root, whatever their groups. Run the `sudo cupsctl ...` command shown on the page. |
 | A new printer profile is missing from "Add a printer" | The profiles are built into the binary: rebuild it (`make release`) and run its `install --web-only`. |
 | "Driver not installed" | `sudo reprinter-web install --printer <id>` installs it. |
@@ -272,7 +277,7 @@ Every request other than `GET` needs the header `X-Reprinter: 1`.
 
 ```sh
 make test       # unit tests: IPP encoding, parsers, validation, lp arguments, installer
-make test-web   # end to end in Docker (Debian 12/13, Ubuntu 22.04/24.04), no printer needed
+make test-web   # end to end in Docker (Debian 12/13, Ubuntu 22.04/24.04, Arch), no printer needed
 ```
 
 `make test-web` (`tests/web-test.sh`) builds the static amd64 binary and puts only that file

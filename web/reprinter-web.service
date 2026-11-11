@@ -1,8 +1,9 @@
 # reprinter web interface. Installed by `reprinter-web install`.
 #
-# Runs as the unprivileged "reprinter" user. That user is in the lpadmin
-# group, which is what lets it change printers through the CUPS tools: CUPS
-# checks group membership over its local socket, no password involved.
+# Runs as the unprivileged "reprinter" user. That user is in the CUPS admin
+# group (lpadmin on Debian, sys on Arch), which is what lets it change printers
+# through the CUPS tools: CUPS checks group membership over its local socket,
+# no password involved.
 [Unit]
 Description=reprinter web interface (print and manage printers from a browser)
 Documentation=https://github.com/jinuthankachan/reprinter/blob/main/docs/web-interface.md

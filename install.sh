@@ -12,7 +12,7 @@
 #
 # Supported hosts: Debian 12+, Ubuntu 22.04+, Raspberry Pi OS (bookworm/trixie)
 # and derivatives, on amd64, arm64 and armhf (other architectures build the
-# driver from source).
+# driver from source); Arch Linux and derivatives (driver built from source).
 
 set -euo pipefail
 
@@ -151,7 +151,8 @@ QUEUE="${QUEUE:-$PRINTER_QUEUE}"
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
-chmod 755 "$WORKDIR" # apt reads local .deb files as its unprivileged _apt user
+# apt reads local .deb files as its unprivileged _apt user; makepkg builds as nobody.
+chmod 755 "$WORKDIR"
 
 log "reprinter"
 info "Host:    ${OS_PRETTY:-$OS_ID} ($ARCH)"

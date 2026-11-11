@@ -2,8 +2,9 @@
 //!
 //! Speaks IPP/1.1 (RFC 8010) over HTTP on the scheduler's Unix domain socket.
 //! Over that socket CUPS accepts `Authorization: PeerCred <user>` and checks
-//! it against the socket's peer credentials, so a service user in the
-//! `lpadmin` group sees all job details without a password.
+//! it against the socket's peer credentials, so a service user in the CUPS
+//! admin group (`lpadmin`, or `sys` on Arch) sees all job details without a
+//! password.
 //!
 //! Only what the web interface reads is implemented: building requests with
 //! simple attribute types, and decoding responses into groups of attributes.

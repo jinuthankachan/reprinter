@@ -70,13 +70,17 @@ driver module is sourced after the profile and must define:
 
 Available to modules:
 
-- Variables: `ARCH` (dpkg architecture: `amd64`, `arm64`, `armhf`, ...),
-  `OS_ID`, `OS_PRETTY`, `WORKDIR` (temporary directory, removed on exit,
-  readable by apt), `FROM_SOURCE` (0 or 1), and the `PRINTER_*` profile fields.
+- Variables: `PKG_FAMILY` (`deb` for Debian-family hosts, `arch` for
+  Arch-family ones), `ARCH` (the package manager's architecture: dpkg's
+  `amd64`, `arm64`, `armhf`, ... on `deb`; `x86_64`, `aarch64`, ... on
+  `arch`), `OS_ID`, `OS_PRETTY`, `WORKDIR` (temporary directory, removed on
+  exit, readable by apt's `_apt` user and by `nobody`), `FROM_SOURCE` (0 or
+  1), and the `PRINTER_*` profile fields.
 - Helpers from `lib/common.sh`: `log`, `info`, `warn`, `die`, `have`,
   `as_root` (runs as root directly or through sudo), `pkg_install` (apt, runs
-  `apt-get update` once), `build_jobs` (parallel jobs that fit in RAM),
-  `version_ge`.
+  `apt-get update` once; or pacman, installing only what is missing; package
+  names differ, so branch on `PKG_FAMILY`), `build_jobs` (parallel jobs that
+  fit in RAM), `version_ge`.
 
 Rules for driver modules:
 
@@ -84,7 +88,9 @@ Rules for driver modules:
   downloaded packages; the expected commit for source builds. Refuse to
   install on a mismatch.
 - **Install as a package** (prebuilt, or a `.deb` built locally with `cpack`
-  or `dpkg-deb`) rather than `make install`, so `apt remove` undoes it.
+  or `dpkg-deb`; on Arch a pacman package built with `makepkg`, which refuses
+  to run as root, so build as `nobody` then) rather than `make install`, so
+  `apt remove` / `pacman -R` undoes it. `drivers/captppd.sh` does both.
 - **Prefer the prebuilt package, fall back to source.** Check that a prebuilt
   package is installable (`apt-get install -s`) before installing it, so a
   dependency mismatch on one release turns into a source build instead of a
@@ -101,7 +107,7 @@ printer. It checks the queue, its defaults, sharing, and that a rerun
 updates the queue in place.
 
 ```sh
-PROFILE=<id> make test-install          # Debian 12/13, Ubuntu 22.04/24.04
+PROFILE=<id> make test-install          # Debian 12/13, Ubuntu 22.04/24.04, Arch
 PROFILE=<id> make test-install-source   # source build (Debian 13)
 ```
 

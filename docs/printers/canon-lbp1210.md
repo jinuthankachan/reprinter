@@ -30,7 +30,8 @@ bitmaps (SCoA format) over USB, with a bidirectional handshake. So:
   from the printer. Release 1.0.0 ships prebuilt `amd64`, `arm64` and `armhf`
   Debian packages.
 
-reprinter uses captppd on every host, x86 and ARM alike. Clients never need a
+reprinter uses captppd on every host, x86 and ARM alike. On Arch, where no
+prebuilt package fits, it builds a pacman package from the pinned commit. Clients never need a
 Canon driver: they send PDF over IPP and the server does all rendering.
 
 ## Features

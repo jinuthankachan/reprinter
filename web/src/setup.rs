@@ -21,6 +21,7 @@ const UNIT_PATH: &str = "/etc/systemd/system/reprinter-web.service";
 const STATE_DIR: &str = "/var/lib/reprinter";
 const CONFIG: &str = "/var/lib/reprinter/config.toml";
 const USER: &str = "reprinter";
+const CUPS_FILES_CONF: &str = "/etc/cups/cups-files.conf";
 const DEFAULT_PORT: u16 = 8631;
 const UNIT: &str = include_str!("../reprinter-web.service");
 
@@ -280,8 +281,13 @@ fn install_settings(o: &Options) -> Result<(String, Option<String>), String> {
             ],
         )?;
     }
-    // lpadmin membership is what CUPS checks before letting it change printers.
-    run("usermod", &["-aG", "lpadmin", USER])?;
+    // Membership of a CUPS admin group is what CUPS checks before letting it
+    // change printers.
+    let group = admin_group()?;
+    run("usermod", &["-aG", &group, USER])?;
+    info(&format!(
+        "{USER} is in the {group} group (CUPS administration)"
+    ));
 
     std::fs::create_dir_all(STATE_DIR).map_err(|e| format!("{STATE_DIR}: {e}"))?;
     std::fs::set_permissions(STATE_DIR, std::fs::Permissions::from_mode(0o750))
@@ -323,6 +329,63 @@ fn install_settings(o: &Options) -> Result<(String, Option<String>), String> {
     }
     run("chown", &["-R", &format!("{USER}:{USER}"), STATE_DIR])?;
     Ok((config.listen, password))
+}
+
+/// The groups cups-files.conf names in SystemGroup: lpadmin on Debian,
+/// "sys root wheel" on Arch. Empty when there is no such line.
+fn system_groups(conf: &str) -> Vec<String> {
+    conf.lines()
+        .filter_map(|line| line.trim().strip_prefix("SystemGroup"))
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .flat_map(str::split_whitespace)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The first of `groups` that exists, leaving out root and wheel: the service
+/// user must not get root's files or, through wheel, sudo.
+fn pick_admin_group(groups: &[String], exists: impl Fn(&str) -> bool) -> Option<String> {
+    groups
+        .iter()
+        .filter(|g| !matches!(g.as_str(), "root" | "wheel"))
+        .find(|g| exists(g))
+        .cloned()
+}
+
+/// The group that lets the service user administer CUPS.
+fn admin_group() -> Result<String, String> {
+    let conf = std::fs::read_to_string(CUPS_FILES_CONF).unwrap_or_default();
+    let mut groups = system_groups(&conf);
+    if groups.is_empty() {
+        groups.push("lpadmin".into());
+    }
+    pick_admin_group(&groups, |g| succeeds("getent", &["group", g])).ok_or_else(|| {
+        format!(
+            "no CUPS admin group for the {USER} user: SystemGroup in {CUPS_FILES_CONF} \
+             names {}, and none of them exists (root and wheel are not used)",
+            groups.join(", ")
+        )
+    })
+}
+
+/// This host's first global IPv4 address. `hostname -I` is not on every
+/// distribution (Arch's base lacks hostname), so ask `ip` first.
+fn host_ip() -> Option<String> {
+    let first_ip = |out: String| {
+        out.split_whitespace()
+            .skip_while(|w| *w != "inet")
+            .nth(1)
+            .and_then(|a| a.split('/').next())
+            .map(str::to_string)
+    };
+    run("ip", &["-4", "-o", "addr", "show", "scope", "global"])
+        .ok()
+        .and_then(first_ip)
+        .or_else(|| {
+            run("hostname", &["-I"])
+                .ok()
+                .and_then(|o| o.split_whitespace().next().map(str::to_string))
+        })
 }
 
 fn port_of(listen: &str) -> Option<u16> {
@@ -394,9 +457,7 @@ fn report(listen: &str, password: Option<&str>) {
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|h| h.trim().to_string())
         .unwrap_or_default();
-    let ip = run("hostname", &["-I"])
-        .ok()
-        .and_then(|o| o.split_whitespace().next().map(str::to_string));
+    let ip = host_ip();
     step("Done");
     if local_only(listen) {
         println!("Web interface: http://127.0.0.1:{port}/   (this host only)");
@@ -529,6 +590,31 @@ mod tests {
         assert_eq!(port_of("[::]:80"), Some(80));
         assert!(local_only("127.0.0.1:8631"));
         assert!(!local_only("0.0.0.0:8631"));
+    }
+
+    #[test]
+    fn cups_admin_group() {
+        let debian = "# comment\nSystemGroup lpadmin\nLogFile /var/log/cups/error_log\n";
+        let arch = "#SystemGroup lpadmin\n  SystemGroup sys root wheel\nSystemGroupX nope\n";
+        assert_eq!(system_groups(debian), args(&["lpadmin"]));
+        assert_eq!(system_groups(arch), args(&["sys", "root", "wheel"]));
+        assert!(system_groups("").is_empty());
+
+        let all = |_: &str| true;
+        assert_eq!(
+            pick_admin_group(&system_groups(arch), all).as_deref(),
+            Some("sys")
+        );
+        assert_eq!(
+            pick_admin_group(&args(&["root", "wheel", "lpadmin"]), all).as_deref(),
+            Some("lpadmin")
+        );
+        assert_eq!(pick_admin_group(&args(&["root", "wheel"]), all), None);
+        let only_sys = |g: &str| g == "sys";
+        assert_eq!(
+            pick_admin_group(&args(&["lpadmin", "sys"]), only_sys).as_deref(),
+            Some("sys")
+        );
     }
 
     #[test]

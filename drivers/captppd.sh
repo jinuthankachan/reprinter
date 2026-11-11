@@ -26,18 +26,34 @@ captppd_deb_sha256() {
 }
 
 driver_install() {
-  local status
-  # shellcheck disable=SC2016 # dpkg-query format, not a shell expansion
-  status="$(dpkg-query -W -f='${Status} ${Version}' captppd 2>/dev/null || true)"
-  if [ "$FROM_SOURCE" -eq 0 ] && [ "$status" = "install ok installed $CAPTPPD_VERSION" ]; then
+  if [ "$FROM_SOURCE" -eq 0 ] && captppd_installed; then
     log "captppd $CAPTPPD_VERSION is already installed"
     return
   fi
 
-  if [ "$FROM_SOURCE" -eq 0 ] && captppd_install_prebuilt; then
-    return
-  fi
-  captppd_install_from_source
+  case "$PKG_FAMILY" in
+    deb)
+      if [ "$FROM_SOURCE" -eq 0 ] && captppd_install_prebuilt; then
+        return
+      fi
+      captppd_install_from_source
+      ;;
+    # Upstream ships .deb packages only: build a pacman package.
+    arch) captppd_install_pacman ;;
+  esac
+}
+
+# Is the pinned version installed as a package?
+captppd_installed() {
+  case "$PKG_FAMILY" in
+    deb)
+      # shellcheck disable=SC2016 # dpkg-query format, not a shell expansion
+      [ "$(dpkg-query -W -f='${Status} ${Version}' captppd 2>/dev/null || true)" = \
+        "install ok installed $CAPTPPD_VERSION" ]
+      ;;
+    # Any pkgrel, so an AUR build of the same version counts too.
+    arch) pacman -Q captppd 2>/dev/null | grep -q "^captppd $CAPTPPD_VERSION-" ;;
+  esac
 }
 
 # Returns 1 (caller falls back to a source build) when there is no prebuilt
@@ -102,6 +118,63 @@ captppd_install_from_source() {
 
   log "Installing $(basename "$deb")"
   as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall "$deb"
+}
+
+# Build a pacman package from the pinned upstream commit with makepkg and
+# install it, so the driver can be removed later with `pacman -R captppd`.
+captppd_install_pacman() {
+  log "Building captppd $CAPTPPD_VERSION from source (pacman package)"
+  pkg_install base-devel git cmake python libcups libusb
+
+  local dir="$WORKDIR/captppd-pkg" builder=() pkg
+  mkdir -p "$dir"
+  chmod 755 "$dir"
+  # makepkg's git source checks out exactly this commit. libcapt is fetched
+  # by captppd's CMake at its pinned tag, as in the Debian source build.
+  cat >"$dir/PKGBUILD" <<EOF
+pkgname=captppd
+pkgver=$CAPTPPD_VERSION
+pkgrel=1
+pkgdesc="CUPS driver for Canon CAPT v1 printers (LBP800, LBP810, LBP1120, LBP1210, LBP3200)"
+arch=("\$CARCH")
+url="$CAPTPPD_REPO"
+license=(BSD-2-Clause)
+depends=(libcups libusb)
+makedepends=(cmake git python)
+options=(!debug)
+source=("captppd::git+$CAPTPPD_REPO.git#commit=$CAPTPPD_COMMIT")
+sha256sums=(SKIP)
+
+build() {
+  cmake -S captppd -B build -DCMAKE_BUILD_TYPE=Release
+  cmake --build build --parallel "\$CAPTPPD_JOBS"
+}
+
+package() {
+  DESTDIR="\$pkgdir" cmake --install build
+  install -Dm644 captppd/LICENSE "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
+}
+EOF
+
+  # makepkg refuses to run as root: build as nobody when we are root.
+  if [ "$(id -u)" -eq 0 ]; then
+    chown nobody "$dir"
+    builder=(runuser -u nobody --)
+  fi
+  local jobs
+  jobs="$(build_jobs)"
+  info "Compiling with $jobs job(s); this takes a while on small boards"
+  # The *DEST and BUILDDIR variables override any the user's makepkg.conf sets.
+  (cd "$dir" && "${builder[@]}" env HOME="$dir" CAPTPPD_JOBS="$jobs" \
+    BUILDDIR="$dir" PKGDEST="$dir" SRCDEST="$dir" SRCPKGDEST="$dir" LOGDEST="$dir" \
+    makepkg --force --nosign --noconfirm --noprogressbar) ||
+    die "makepkg could not build captppd (see output above)"
+
+  pkg="$(find "$dir" -maxdepth 1 -name "captppd-$CAPTPPD_VERSION-*.pkg.tar*" ! -name '*.sig' -print -quit)"
+  [ -n "$pkg" ] || die "makepkg did not produce a captppd package (see output above)"
+
+  log "Installing $(basename "$pkg")"
+  as_root pacman -U --noconfirm "$pkg"
 }
 
 driver_configure() {
