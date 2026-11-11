@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>reprinter</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/print">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v5H7zM5 9h14a2 2 0 0 1 2 2v6h-4v4H7v-4H3v-6a2 2 0 0 1 2-2zm4 7v3h6v-3zm8-4.5a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"/></svg>
+    <span>reprinter</span>
+  </a>
+  <span class="host" id="host"></span>
+  <nav class="tabs" aria-label="Sections">
+    <a href="#/print" data-view="print">Print</a>
+    <a href="#/jobs" data-view="jobs">Jobs</a>
+    <a href="#/settings" data-view="settings">Settings</a>
+  </nav>
+</header>
+
+<main>
+  <!-- Print ---------------------------------------------------------------->
+  <section class="view" id="view-print" hidden>
+    <div class="notice" id="no-printers" hidden>
+      <strong>No printers yet.</strong> Add one under <a href="#/settings">Settings</a>,
+      or run <code>./install.sh</code> on the server.
+    </div>
+
+    <div class="print-grid">
+      <div class="stack">
+        <div class="card">
+          <label class="label" for="printer">Printer</label>
+          <div class="row">
+            <select id="printer"></select>
+            <span id="printer-state"></span>
+          </div>
+          <p class="hint" id="printer-message"></p>
+        </div>
+
+        <div class="card">
+          <h2>Document</h2>
+          <label class="drop" id="drop">
+            <input type="file" id="file"
+              accept=".pdf,.ps,.eps,.jpg,.jpeg,.png,.gif,.tif,.tiff,.txt,application/pdf,application/postscript,image/jpeg,image/png,image/gif,image/tiff,text/plain">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l5 5h-3v6h-4V8H7zM5 16h2v3h10v-3h2v5H5z"/></svg>
+            <span><strong>Choose a file</strong> or drop it here</span>
+            <small>PDF, PostScript, JPEG, PNG, GIF, TIFF or plain text</small>
+          </label>
+          <div class="progress" id="progress" hidden><div class="bar" id="progress-bar"></div></div>
+          <div id="doc" hidden>
+            <div class="doc-head">
+              <div class="doc-title"><strong id="doc-name"></strong><small id="doc-meta"></small></div>
+              <button type="button" class="ghost small" id="doc-remove">Remove</button>
+            </div>
+            <div class="preview" id="preview"></div>
+          </div>
+        </div>
+      </div>
+
+      <form class="card" id="setup" novalidate>
+        <h2>Page setup</h2>
+        <div class="fields">
+          <label class="field"><span>Copies</span>
+            <input type="number" id="copies" min="1" max="999" value="1" inputmode="numeric"></label>
+          <label class="field"><span>Pages</span>
+            <input type="text" id="pages" placeholder="All" autocomplete="off" spellcheck="false">
+            <small>e.g. 1-3, 5</small></label>
+          <div class="contents" id="ppd-main"></div>
+          <label class="field"><span>Orientation</span>
+            <select id="orientation">
+              <option value="auto">Automatic</option>
+              <option value="portrait">Portrait</option>
+              <option value="landscape">Landscape</option>
+            </select></label>
+          <label class="field"><span>Scaling</span>
+            <select id="scaling">
+              <option value="auto">Automatic</option>
+              <option value="fit">Fit to page</option>
+              <option value="fill">Fill page (crop)</option>
+              <option value="none">Actual size</option>
+            </select></label>
+          <label class="field"><span>Pages per sheet</span>
+            <select id="number-up">
+              <option>1</option><option>2</option><option>4</option>
+              <option>6</option><option>9</option><option>16</option>
+            </select></label>
+        </div>
+
+        <label class="check" id="collate-row" hidden>
+          <input type="checkbox" id="collate" checked>
+          <span>Collate copies <small>1, 2, 3, 1, 2, 3 instead of 1, 1, 2, 2, 3, 3</small></span>
+        </label>
+        <label class="check" id="manual-duplex-row" hidden>
+          <input type="checkbox" id="manual-duplex">
+          <span>Two-sided by hand <small>Prints the front sides, then asks you to turn the paper over</small></span>
+        </label>
+
+        <details class="more">
+          <summary>More options</summary>
+          <div class="fields">
+            <label class="field"><span>Print only</span>
+              <select id="page-set">
+                <option value="all">All pages</option>
+                <option value="odd">Odd pages</option>
+                <option value="even">Even pages</option>
+              </select></label>
+            <div class="contents" id="ppd-extra"></div>
+          </div>
+          <label class="check"><input type="checkbox" id="reverse"><span>Reverse page order</span></label>
+        </details>
+
+        <button type="submit" class="primary wide" id="print-btn" disabled>Print</button>
+        <div class="duplex-panel" id="duplex-panel" hidden></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Queue</h2><a href="#/jobs" class="small">All jobs</a></div>
+      <div id="queue"></div>
+    </div>
+  </section>
+
+  <!-- Jobs ----------------------------------------------------------------->
+  <section class="view" id="view-jobs" hidden>
+    <div class="card">
+      <div class="card-head">
+        <h2>Active jobs</h2>
+        <select id="jobs-printer" aria-label="Printer"><option value="">All printers</option></select>
+      </div>
+      <div id="jobs-active"></div>
+    </div>
+    <div class="card">
+      <h2>Recent jobs</h2>
+      <div id="jobs-finished"></div>
+    </div>
+  </section>
+
+  <!-- Settings (built by app.js) ------------------------------------------->
+  <section class="view" id="view-settings" hidden></section>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

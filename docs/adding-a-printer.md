@@ -34,11 +34,15 @@ Example: the Canon LBP3200, which captppd already supports.
    a multi-page PDF and a second job after the first finished.
 6. Add `docs/printers/<id>.md` (copy the LBP-1210 page) and a row to the
    "Supported printers" table in the README.
+7. If the web interface is installed, rerun `./install-web.sh` so that
+   Settings → "Add a printer" lists the new profile.
 
 ### Profile fields
 
 Profiles are bash files sourced by `install.sh`; keep them to plain
-assignments.
+assignments. The web interface reads them without running bash, so values
+must be literal (quoted or bare words, no `$variables` or command
+substitution).
 
 | Field | Required | Meaning |
 |-------|----------|---------|
