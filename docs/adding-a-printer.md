@@ -35,7 +35,7 @@ Example: the Canon LBP3200, which captppd already supports.
 6. Add `docs/printers/<id>.md` (copy the LBP-1210 page) and a row to the
    "Supported printers" table in the README.
 7. `reprinter-web` has the profiles built in: rebuild it
-   (`web/build-release.sh`) so that `reprinter-web install` and Settings →
+   (`make release`) so that `reprinter-web install` and Settings →
    "Add a printer" know the new printer. While testing,
    `reprinter-web --share-dir <checkout>` reads them from the checkout.
 
@@ -101,8 +101,8 @@ printer. It checks the queue, its defaults, sharing, and that a rerun
 updates the queue in place.
 
 ```sh
-PROFILE=<id> tests/container-test.sh                         # Debian 12/13, Ubuntu 22.04/24.04
-PROFILE=<id> FROM_SOURCE=1 tests/container-test.sh debian:13 # source build
+PROFILE=<id> make test-install          # Debian 12/13, Ubuntu 22.04/24.04
+PROFILE=<id> make test-install-source   # source build (Debian 13)
 ```
 
 It cannot test the USB side. Before marking a printer supported, print on

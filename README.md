@@ -49,7 +49,8 @@ nothing else is needed: it runs the steps below, then installs itself as the
 web interface service. It takes the same options as `install.sh` plus a few
 of its own (`./reprinter-web install --help`). The binaries (`amd64`,
 `arm64`, `armhf`) are static and run on every supported release; the release
-page has their `SHA256SUMS`. To build them yourself: `web/build-release.sh`.
+page has their `SHA256SUMS`. To build them yourself: `make release` (see
+[Development](#development)).
 
 **From the repository**, print server only:
 
@@ -209,6 +210,7 @@ sudo cupsctl --no-remote-any --no-remote-admin --no-share-printers
 
 ```
 install.sh               entry point
+Makefile                 developer commands (run make to list them)
 lib/common.sh            platform detection, packages, services
 lib/cups.sh              CUPS stack, sharing, firewall, device discovery, queue
 drivers/<driver>.sh      one module per driver: install, host tweaks, diagnostics
@@ -226,12 +228,48 @@ the driver module knows how to install that driver on any supported host. New
 printers that use an existing driver only need a profile. See
 [docs/adding-a-printer.md](docs/adding-a-printer.md).
 
-Run the smoke tests (needs Docker; installs everything inside throwaway
-containers and creates the queue on a fake device URI):
+## Development
+
+`make` lists the developer commands:
+
+| Command | What it does |
+|---------|--------------|
+| `make build` | Build `reprinter-web` for this machine (`web/target/release/`) |
+| `make run` | Run the web interface on `http://127.0.0.1:8631/` against this machine's CUPS, with the printer profiles from the checkout. Settings and uploads go to `web/dev/`. Changing printers needs your user in `lpadmin`. |
+| `make test` | Unit tests |
+| `make lint` | `cargo fmt --check`, clippy, shell syntax, and shellcheck if it is installed |
+| `make check` | `lint`, then `test` |
+| `make test-install` | `install.sh` in throwaway Docker containers, with the queue on a fake device URI |
+| `make test-install-source` | The same with the driver built from source |
+| `make test-web` | `reprinter-web` end to end in Docker: one-step install, printing, settings, uninstall |
+| `make test-all` | `check`, `test-install` and `test-web` |
+| `make release` | Static `reprinter-web` binaries for amd64, arm64 and armhf, with `SHA256SUMS`, in `web/dist/` |
+| `make install` | Build, then `sudo reprinter-web install` on this machine |
+| `make uninstall` | Remove the web interface service from this machine |
+| `make tag` | Tag `v<version>` from `web/Cargo.toml` for a release (does not push) |
+| `make clean` | Remove build output, `web/dist/` and `web/dev/` |
+
+Variables refine them:
 
 ```sh
-tests/container-test.sh                          # Debian 12/13, Ubuntu 22.04/24.04
-FROM_SOURCE=1 tests/container-test.sh debian:13  # source-build path
-(cd web && cargo test)                           # web interface unit tests
-tests/web-test.sh                                # reprinter-web end to end (Debian 12/13, Ubuntu 22.04/24.04)
+make run PORT=9000
+make release ARCHS=arm64
+make test-install IMAGES="debian:12 ubuntu:24.04"
+PROFILE=<id> make test-install                       # another printer profile
+make install INSTALL_ARGS="--printer canon-lbp1210 --paper letter"
 ```
+
+Building needs Rust ([rustup](https://rustup.rs)); `release` and `test-web`
+build static binaries, and rustup adds the musl targets they need. The
+`test-*` targets need Docker, but no printer: they cover Debian 12/13 and
+Ubuntu 22.04/24.04.
+
+### Releasing
+
+1. Set `version` in `web/Cargo.toml` and commit.
+2. `make tag`, then push the tag: `git push origin v<version>`.
+
+The release workflow (`.github/workflows/release.yml`) then builds the three
+binaries and attaches them, with `SHA256SUMS`, to the GitHub release. The
+download link in [Quick start](#quick-start) always fetches the latest
+release.

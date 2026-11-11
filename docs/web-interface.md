@@ -81,8 +81,8 @@ and publishes them (`.github/workflows/release.yml`). To build them
 yourself, on any Linux PC with [rustup](https://rustup.rs):
 
 ```sh
-web/build-release.sh          # web/dist/reprinter-web-{amd64,arm64,armhf} and SHA256SUMS
-web/build-release.sh arm64    # one architecture
+make release                  # web/dist/reprinter-web-{amd64,arm64,armhf} and SHA256SUMS
+make release ARCHS=arm64      # one architecture
 ```
 
 No cross compiler is needed: Rust's own linker (`rust-lld`) links the musl
@@ -168,7 +168,7 @@ sudo systemctl restart reprinter-web
 | "cannot reach CUPS" | `systemctl status cups`. The service talks to `/run/cups/cups.sock`. |
 | Changing a printer says "Forbidden" or "Unauthorized" | The `reprinter` user must be in `lpadmin`: `id reprinter`. Rerun `sudo reprinter-web install --web-only`. |
 | Network sharing: "CUPS on this server only lets root change these settings" | Some CUPS builds (Ubuntu 24.04) refuse configuration changes from anyone but root, whatever their groups. Run the `sudo cupsctl ...` command shown on the page. |
-| A new printer profile is missing from "Add a printer" | The profiles are built into the binary: rebuild it (`web/build-release.sh`) and run its `install --web-only`. |
+| A new printer profile is missing from "Add a printer" | The profiles are built into the binary: rebuild it (`make release`) and run its `install --web-only`. |
 | "Driver not installed" | `sudo reprinter-web install --printer <id>` installs it. |
 | Upload refused as too large | Settings → Web interface → Upload limit. |
 | A job fails | Same as any CUPS job: the printer's page under [printers/](printers/), and `/var/log/cups/error_log`. |
@@ -212,11 +212,11 @@ Every request other than `GET` needs the header `X-Reprinter: 1`.
 ## Tests
 
 ```sh
-cd web && cargo test     # unit tests: IPP encoding, parsers, validation, lp arguments
-tests/web-test.sh        # end to end in Docker (Debian 13, Ubuntu 24.04), no printer needed
+make test       # unit tests: IPP encoding, parsers, validation, lp arguments, installer
+make test-web   # end to end in Docker (Debian 12/13, Ubuntu 22.04/24.04), no printer needed
 ```
 
-`tests/web-test.sh` builds the static amd64 binary and puts only that file
+`make test-web` (`tests/web-test.sh`) builds the static amd64 binary and puts only that file
 into each container (no checkout), runs `reprinter-web install`, adds a queue
 whose backend writes jobs to files, and drives the API with `curl`: uploads,
 printing with a page setup, queue and cancel, printer settings, adding a
