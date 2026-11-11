@@ -1,6 +1,6 @@
 [package]
 name = "reprinter-web"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # Debian 13 ships rustc 1.85, so it can build this without rustup.
 rust-version = "1.85"
